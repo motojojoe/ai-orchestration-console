@@ -25,6 +25,22 @@ export interface RunOpenCodeOptions {
  * (spec §8) killed it on every run. Scoped to the run's disposable worktree (spec §5), never
  * the user's main working directory.
  */
+/**
+ * OpenCode reports its own failures as a `{"type":"error",...}` NDJSON event on stdout, not on
+ * stderr — stderr is empty on these failures. Prefer that event's detail; fall back to stderr
+ * (or a placeholder) for exits where OpenCode crashed before it could emit anything at all.
+ */
+function describeOpenCodeError(events: NdjsonEvent[], stderr: string): string {
+  const errorEvent = events.find((event) => event.type === "error");
+  if (errorEvent) {
+    const error = errorEvent.error as { name?: string; data?: { message?: string; ref?: string } } | undefined;
+    const message = error?.data?.message ?? JSON.stringify(errorEvent.error ?? errorEvent);
+    const ref = error?.data?.ref ? ` (ref: ${error.data.ref})` : "";
+    return `${error?.name ?? "error"}: ${message}${ref}`;
+  }
+  return stderr.trim() || "(no error output captured)";
+}
+
 export function runOpenCode(opts: RunOpenCodeOptions) {
   const args = [
     "run",
@@ -47,7 +63,7 @@ export function runOpenCode(opts: RunOpenCodeOptions) {
 
   const stagePromise = result.then(({ events, exitCode, stderr }): OpenCodeStageResult => {
     if (exitCode !== 0) {
-      throw new Error(`opencode exited with code ${exitCode}: ${stderr.slice(0, 4000)}`);
+      throw new Error(`opencode exited with code ${exitCode}: ${describeOpenCodeError(events, stderr)}`);
     }
 
     let text = "";
