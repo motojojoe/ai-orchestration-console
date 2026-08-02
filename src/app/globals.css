@@ -474,3 +474,34 @@ textarea {
   font-family: var(--font-mono);
   font-weight: 600;
 }
+
+.heartbeat-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+.heartbeat-dot-live {
+  background: var(--good);
+  box-shadow: 0 0 0 rgba(31, 143, 99, 0.5);
+  animation: heartbeat-pulse 2s ease-out infinite;
+}
+.heartbeat-dot-warn {
+  background: var(--bad);
+}
+@keyframes heartbeat-pulse {
+  0% {
+    box-shadow: 0 0 0 0 var(--good-wash);
+  }
+  70% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .heartbeat-dot-live {
+    animation: none;
+  }
+}

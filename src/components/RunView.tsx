@@ -77,6 +77,36 @@ function formatCliEvent(stage: Stage, event: Record<string, unknown>): string | 
   return null;
 }
 
+function HeartbeatIndicator({
+  connection,
+  lastEventAt,
+  now,
+}: {
+  connection: "connecting" | "open" | "error";
+  lastEventAt: number | null;
+  now: number;
+}) {
+  const secsSince = lastEventAt !== null ? Math.max(0, Math.round((now - lastEventAt) / 1000)) : null;
+  // The server sends a heartbeat every 5s even when nothing else is happening — well past that
+  // with no word from it means the connection is stuck, whatever `readyState` currently claims.
+  const stale = secsSince !== null && secsSince > 12;
+
+  const label =
+    connection === "error" ? "Disconnected" : connection === "connecting" ? "Connecting…" : stale ? "Stalled" : "Live";
+  const dotClass = connection === "open" && !stale ? "heartbeat-dot-live" : "heartbeat-dot-warn";
+
+  return (
+    <div className="field">
+      <span className="eyebrow">Connection</span>
+      <span className="val" style={{ display: "flex", alignItems: "center", gap: "0.5em" }}>
+        <span className={`heartbeat-dot ${dotClass}`} aria-hidden="true" />
+        {label}
+        {secsSince !== null && <span style={{ color: "var(--ink-60)", fontSize: "0.82em" }}>· {secsSince}s ago</span>}
+      </span>
+    </div>
+  );
+}
+
 function DiffView({ diff }: { diff: string }) {
   if (!diff.trim()) return <p style={{ color: "var(--ink-60)" }}>No changes.</p>;
   const lines = diff.split("\n");
@@ -119,7 +149,12 @@ export default function RunView({ runId }: { runId: string }) {
   const [log, setLog] = useState<Record<Stage, string[]>>({ plan: [], execute: [], review: [] });
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [connection, setConnection] = useState<"connecting" | "open" | "error">("connecting");
+  const [lastEventAt, setLastEventAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
   const notifiedRef = useRef(false);
+  const runRef = useRef<Run | null>(null);
+  runRef.current = run;
 
   const refetch = useCallback(async () => {
     const res = await fetch(`/api/runs/${runId}`);
@@ -134,12 +169,28 @@ export default function RunView({ runId }: { runId: string }) {
     void refetch();
   }, [refetch]);
 
+  // Drives the "updated Xs ago" heartbeat readout — a plain ticking clock, not tied to SSE.
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
   useEffect(() => {
     const source = new EventSource(`/api/runs/${runId}/events`);
+    setConnection("connecting");
+
+    source.onopen = () => setConnection("open");
+    source.onerror = () => {
+      // EventSource retries automatically; reflect that in the indicator rather than treating it
+      // as fatal — readyState flips back to CONNECTING while it reconnects.
+      setConnection(source.readyState === EventSource.CLOSED ? "error" : "connecting");
+    };
 
     source.onmessage = (msg) => {
+      setLastEventAt(Date.now());
       const event = JSON.parse(msg.data) as
         | { type: "connected" }
+        | { type: "heartbeat"; ts: number }
         | { type: "status_change"; status: RunStatus }
         | { type: "cli_event"; stage: Stage; data: Record<string, unknown> }
         | { type: "stage_failed"; stage: Stage; message: string; timedOut: boolean }
@@ -154,20 +205,18 @@ export default function RunView({ runId }: { runId: string }) {
           setLog((prev) => ({ ...prev, [event.stage]: [...prev[event.stage], line] }));
         }
       } else if (event.type === "stage_failed") {
-        notifyStageFailed(run?.task ?? "Run", event.stage, event.timedOut);
+        notifyStageFailed(runRef.current?.task ?? "Run", event.stage, event.timedOut);
         void refetch();
       } else if (event.type === "run_completed") {
         if (!notifiedRef.current) {
           notifiedRef.current = true;
-          notifyRunCompleted(run?.task ?? "Run", event.verdict);
+          notifyRunCompleted(runRef.current?.task ?? "Run", event.verdict);
         }
         void refetch();
       }
     };
 
     return () => source.close();
-    // run.task is only used inside the handler for notification copy — resubscribing per keystroke isn't needed.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId, refetch]);
 
   async function doAction(path: string, body?: unknown) {
@@ -228,6 +277,8 @@ export default function RunView({ runId }: { runId: string }) {
           <span className="eyebrow">Execute model</span>
           <span className="val mono">opencode/deepseek-v4-flash-free</span>
         </div>
+
+        <HeartbeatIndicator connection={connection} lastEventAt={lastEventAt} now={now} />
 
         <nav className="stepper" aria-label="Pipeline progress">
           {STEP_ORDER.map((s) => {

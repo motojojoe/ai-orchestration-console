@@ -21,10 +21,13 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       send({ type: "connected" });
       const unsubscribe = subscribeRunEvents(id, send);
 
-      // Keep intermediaries (proxies, browsers) from timing out an idle connection.
+      // Keep intermediaries (proxies, browsers) from timing out an idle connection, and give the
+      // client a visible signal the connection is still alive during quiet stretches — a real
+      // `data:` event, not just a comment, so the UI can display it (comments are invisible to
+      // EventSource's `onmessage`).
       const heartbeat = setInterval(() => {
-        controller.enqueue(encoder.encode(": heartbeat\n\n"));
-      }, 15000);
+        send({ type: "heartbeat", ts: Date.now() });
+      }, 5000);
 
       const close = () => {
         clearInterval(heartbeat);
