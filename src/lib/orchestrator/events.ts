@@ -8,7 +8,14 @@ export type RunEvent =
   | { type: "stage_failed"; stage: "plan" | "execute" | "review"; message: string; timedOut: boolean }
   | { type: "run_completed"; verdict: "APPROVE" | "NEEDS_CHANGES" };
 
-const emitters = new Map<string, EventEmitter>();
+// Stashed on globalThis, not a plain module-level variable: Next.js dev-mode hot-reload can
+// re-evaluate this file's top level independently per route (e.g. once for the route that starts
+// a run, again for the SSE route that subscribes to it) — a plain `const emitters = new Map()`
+// would give each of those its own Map, so events emitted from one never reach the other's
+// subscribers. globalThis is the one thing guaranteed to be the same object across all of them
+// within a single Node process.
+const g = globalThis as unknown as { __orchestratorEmitters?: Map<string, EventEmitter> };
+const emitters = (g.__orchestratorEmitters ??= new Map<string, EventEmitter>());
 
 function getEmitter(runId: string): EventEmitter {
   let e = emitters.get(runId);

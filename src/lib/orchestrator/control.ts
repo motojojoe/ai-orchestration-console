@@ -2,8 +2,16 @@ interface StageController {
   kill: ((signal: NodeJS.Signals) => void) | null;
 }
 
-const controllers = new Map<string, StageController>();
-const cancelledRuns = new Set<string>();
+// Same globalThis-stashing reason as in events.ts: this state must survive independent module
+// re-evaluation across routes under Next.js dev-mode hot-reload (e.g. the route that runs a stage
+// vs. the route that later tries to cancel it) — a plain module-level Map/Set risks the cancel
+// request finding an empty registry and silently doing nothing.
+const g = globalThis as unknown as {
+  __orchestratorControllers?: Map<string, StageController>;
+  __orchestratorCancelledRuns?: Set<string>;
+};
+const controllers = (g.__orchestratorControllers ??= new Map<string, StageController>());
+const cancelledRuns = (g.__orchestratorCancelledRuns ??= new Set<string>());
 
 function getController(runId: string): StageController {
   let c = controllers.get(runId);
