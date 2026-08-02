@@ -17,15 +17,6 @@ export interface RunOpenCodeOptions {
 }
 
 /**
- * Spec §3.2: headless OpenCode invocation for the Execute stage.
- *
- * `--dangerously-skip-permissions` is required here even though it isn't named in the spec's
- * tickets: OpenCode's default tool-permission flow expects an interactive prompt, and this
- * process has no TTY to answer one. Without it, Execute would hang until the stage timeout
- * (spec §8) killed it on every run. Scoped to the run's disposable worktree (spec §5), never
- * the user's main working directory.
- */
-/**
  * OpenCode reports its own failures as a `{"type":"error",...}` NDJSON event on stdout, not on
  * stderr — stderr is empty on these failures. Prefer that event's detail; fall back to stderr
  * (or a placeholder) for exits where OpenCode crashed before it could emit anything at all.
@@ -41,6 +32,15 @@ function describeOpenCodeError(events: NdjsonEvent[], stderr: string): string {
   return stderr.trim() || "(no error output captured)";
 }
 
+/**
+ * Spec §3.2: headless OpenCode invocation for the Execute stage.
+ *
+ * `--dangerously-skip-permissions` is required here even though it isn't named in the spec's
+ * tickets: OpenCode's default tool-permission flow expects an interactive prompt, and this
+ * process has no TTY to answer one. Without it, Execute would hang until the stage timeout
+ * (spec §8) killed it on every run. Scoped to the run's disposable worktree (spec §5), never
+ * the user's main working directory.
+ */
 export function runOpenCode(opts: RunOpenCodeOptions) {
   const args = [
     "run",
