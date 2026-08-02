@@ -11,6 +11,12 @@ this machine: **Plan** (Claude Code, headless) → **Execute** (OpenCode, free m
 `SPEC.md` before changing pipeline behavior; it documents *why* things work the way they do, not
 just what the code does.
 
+## Git workflow
+
+This repo follows **gitflow** — never commit directly to `main`. Do work on a `feature/*` (or
+`fix/*`) branch off `develop` and merge back through a PR; `main` only receives merges from
+`develop` or release/hotfix branches.
+
 ## Commands
 
 ```bash
