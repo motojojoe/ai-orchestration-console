@@ -1,0 +1,229 @@
+import { randomUUID } from "node:crypto";
+import { parseVerdict, runClaude } from "../cli/claude";
+import { runOpenCode } from "../cli/opencode";
+import { computeDiff, createRunWorktree, removeRunWorktree, writePlanFileAndCommit } from "../git";
+import { createRun, getRun, type Run, type RunStatus, updateRun } from "../db";
+import { StageTimeoutError, clearController, gracefulStop, isCancelled, markCancelled, runStage } from "./control";
+import { emitRunEvent } from "./events";
+import { buildExecutePrompt, buildPlanPrompt, buildReviewPrompt } from "./prompts";
+
+const RETRY_CAP = 3;
+const OPENCODE_MODEL = process.env.ORCHESTRATOR_OPENCODE_MODEL ?? "opencode/deepseek-v4-flash-free";
+const TERMINAL_STATUSES: RunStatus[] = ["approved", "closed_needs_changes", "failed", "cancelled"];
+
+function setStatus(runId: string, status: RunStatus, patch: Partial<Run> = {}): void {
+  updateRun(runId, { status, ...patch });
+  emitRunEvent(runId, { type: "status_change", status });
+}
+
+/** Spec §5: the worktree is removed on any terminal state; the branch itself is never deleted. */
+async function finalizeTerminal(run: Run): Promise<void> {
+  if (run.worktree_path) {
+    try {
+      await removeRunWorktree(run.project_path, run.worktree_path);
+    } catch (err) {
+      console.error(`Failed to remove worktree for run ${run.id}:`, err);
+    }
+    updateRun(run.id, { worktree_path: null });
+  }
+  clearController(run.id);
+}
+
+async function failRun(runId: string, stage: "plan" | "execute" | "review", err: unknown): Promise<void> {
+  const run = getRun(runId);
+  if (!run) return;
+  const message = err instanceof Error ? err.message : String(err);
+
+  if (isCancelled(runId)) {
+    setStatus(runId, "cancelled", { error_message: message, failed_stage: stage });
+  } else {
+    setStatus(runId, "failed", { error_message: message, failed_stage: stage });
+    emitRunEvent(runId, {
+      type: "stage_failed",
+      stage,
+      message,
+      timedOut: err instanceof StageTimeoutError,
+    });
+  }
+  await finalizeTerminal(getRun(runId)!);
+}
+
+/** Spec §10 project selection + §5 branch naming: creates the DB row; caller still needs to `startRun`. */
+export function createNewRun(input: { projectPath: string; task: string; autoApprove: boolean }): Run {
+  const id = randomUUID();
+  return createRun({
+    id,
+    project_path: input.projectPath,
+    task: input.task,
+    branch_name: `orchestrator/${id}`,
+    auto_approve: input.autoApprove,
+  });
+}
+
+/** Spec §3.1: sets up the run's worktree and runs the Plan stage. */
+export async function startRun(runId: string): Promise<void> {
+  const run = getRun(runId);
+  if (!run) throw new Error(`Run not found: ${runId}`);
+
+  try {
+    const { worktreePath } = await createRunWorktree(run.project_path, run.id);
+    updateRun(run.id, { worktree_path: worktreePath });
+
+    const handle = runClaude({
+      cwd: worktreePath,
+      prompt: buildPlanPrompt(run.task),
+      mode: "plan",
+      onEvent: (event) => emitRunEvent(run.id, { type: "cli_event", stage: "plan", data: event }),
+    });
+
+    const started = Date.now();
+    const stageResult = await runStage(run.id, handle);
+    if (stageResult.isError) {
+      throw new Error(`Plan stage reported an error: ${stageResult.resultText}`);
+    }
+
+    updateRun(run.id, {
+      plan_text: stageResult.resultText,
+      plan_original_text: stageResult.resultText,
+      plan_duration_ms: stageResult.durationMs ?? Date.now() - started,
+      plan_tokens_in: stageResult.tokensIn,
+      plan_tokens_out: stageResult.tokensOut,
+      plan_cost_usd: stageResult.costUsd,
+    });
+
+    // Spec §6: auto-approve (the default) skips straight to Execute; otherwise wait for /approve.
+    if (run.auto_approve) {
+      await approveRun(run.id, stageResult.resultText);
+    } else {
+      setStatus(run.id, "awaiting_approval");
+    }
+  } catch (err) {
+    await failRun(run.id, "plan", err);
+  }
+}
+
+/** Spec §6: approving (auto or manual) commits the — possibly user-edited — plan and starts Execute. */
+export async function approveRun(runId: string, finalPlanText: string): Promise<void> {
+  const run = getRun(runId);
+  if (!run?.worktree_path) throw new Error(`Run ${runId} has no active worktree to approve into`);
+
+  updateRun(runId, { plan_text: finalPlanText });
+  await writePlanFileAndCommit(run.worktree_path, finalPlanText);
+  await runExecuteAndReview(runId, finalPlanText, undefined);
+}
+
+/** Spec §3.2 + §3.3 + §7: runs Execute then Review, and records the outcome. */
+async function runExecuteAndReview(
+  runId: string,
+  planText: string,
+  retryFeedback: string | undefined,
+): Promise<void> {
+  let stage: "execute" | "review" = "execute";
+  try {
+    const run = getRun(runId)!;
+    const worktreePath = run.worktree_path!;
+
+    setStatus(runId, "executing");
+    const executeHandle = runOpenCode({
+      cwd: worktreePath,
+      prompt: buildExecutePrompt(planText, retryFeedback),
+      model: OPENCODE_MODEL,
+      onEvent: (event) => emitRunEvent(runId, { type: "cli_event", stage: "execute", data: event }),
+    });
+    const executeStarted = Date.now();
+    const executeResult = await runStage(runId, executeHandle);
+    updateRun(runId, {
+      execute_duration_ms: Date.now() - executeStarted,
+      execute_tokens_in: executeResult.tokensIn,
+      execute_tokens_out: executeResult.tokensOut,
+      execute_cost_usd: executeResult.costUsd,
+    });
+
+    const diffText = await computeDiff(worktreePath);
+    updateRun(runId, { diff_text: diffText });
+
+    stage = "review";
+    setStatus(runId, "reviewing");
+    const reviewHandle = runClaude({
+      cwd: worktreePath,
+      prompt: buildReviewPrompt(planText, diffText),
+      mode: "review",
+      onEvent: (event) => emitRunEvent(runId, { type: "cli_event", stage: "review", data: event }),
+    });
+    const reviewStarted = Date.now();
+    const reviewResult = await runStage(runId, reviewHandle);
+    if (reviewResult.isError) {
+      throw new Error(`Review stage reported an error: ${reviewResult.resultText}`);
+    }
+
+    const { verdict, reasoning } = parseVerdict(reviewResult.resultText);
+    updateRun(runId, {
+      verdict,
+      review_reasoning: reasoning,
+      review_duration_ms: reviewResult.durationMs ?? Date.now() - reviewStarted,
+      review_tokens_in: reviewResult.tokensIn,
+      review_tokens_out: reviewResult.tokensOut,
+      review_cost_usd: reviewResult.costUsd,
+    });
+
+    if (verdict === "APPROVE") {
+      setStatus(runId, "approved");
+      await finalizeTerminal(getRun(runId)!);
+    } else {
+      // Spec §7: non-blocking — the run sits here until the user retries, closes, or cancels it.
+      setStatus(runId, "needs_changes");
+    }
+    emitRunEvent(runId, { type: "run_completed", verdict });
+  } catch (err) {
+    await failRun(runId, stage, err);
+  }
+}
+
+/** Spec §7: re-runs Execute on the same branch with Review's feedback appended, capped at 3 cycles. */
+export async function retryExecute(runId: string): Promise<void> {
+  const run = getRun(runId);
+  if (!run) throw new Error(`Run not found: ${runId}`);
+  if (run.status !== "needs_changes") throw new Error(`Run ${runId} is not awaiting retry`);
+  if (run.retry_count >= RETRY_CAP) {
+    throw new Error(`Run ${runId} has reached the retry cap (${RETRY_CAP}) — edit the plan or close it manually.`);
+  }
+
+  updateRun(runId, { retry_count: run.retry_count + 1 });
+  await runExecuteAndReview(runId, run.plan_text ?? "", run.review_reasoning ?? undefined);
+}
+
+/** Spec §6: rejecting at the approval gate, before Execute ever runs. */
+export async function rejectRun(runId: string): Promise<void> {
+  const run = getRun(runId);
+  if (!run) throw new Error(`Run not found: ${runId}`);
+  setStatus(runId, "cancelled");
+  await finalizeTerminal(getRun(runId)!);
+}
+
+/** Spec §7: closing a `needs_changes` run without retrying further. */
+export async function closeRun(runId: string): Promise<void> {
+  const run = getRun(runId);
+  if (!run) throw new Error(`Run not found: ${runId}`);
+  if (run.status !== "needs_changes") throw new Error(`Run ${runId} cannot be closed from status ${run.status}`);
+  setStatus(runId, "closed_needs_changes");
+  await finalizeTerminal(getRun(runId)!);
+}
+
+/** Spec §8: cancel — graceful SIGTERM/SIGKILL if a stage is mid-flight, otherwise just close it out. */
+export async function cancelRun(runId: string): Promise<void> {
+  const run = getRun(runId);
+  if (!run) throw new Error(`Run not found: ${runId}`);
+  if (TERMINAL_STATUSES.includes(run.status)) return;
+
+  markCancelled(runId);
+
+  if (run.status === "planning" || run.status === "executing" || run.status === "reviewing") {
+    // The in-flight stage's promise rejects once the process exits; failRun() sees isCancelled()
+    // and records status "cancelled" instead of "failed".
+    await gracefulStop(runId);
+    return;
+  }
+
+  setStatus(runId, "cancelled");
+  await finalizeTerminal(getRun(runId)!);
+}
