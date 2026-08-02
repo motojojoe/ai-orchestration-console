@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { Run, RunStatus } from "@/lib/db";
 import { notifyRunCompleted, notifyStageFailed, requestNotificationPermission } from "@/lib/notify";
 
@@ -128,6 +128,64 @@ function DiffView({ diff }: { diff: string }) {
   );
 }
 
+/** What to show when a stepper item is selected — reuses each stage's own persisted output. */
+function stepDetail(
+  displayStage: Stage,
+  run: Run,
+  log: Record<Stage, string[]>,
+  isLive: boolean,
+): { title: string; cardClass: string; body: ReactNode } {
+  const label = STEP_ORDER.find((s) => s.key === displayStage)!.label;
+
+  if (isLive) {
+    return {
+      title: `${label} — live output`,
+      cardClass: "",
+      body: <div className="log">{log[displayStage].join("\n") || "waiting for output…"}</div>,
+    };
+  }
+
+  const state = stepState(run, displayStage);
+  if (state === "pending") {
+    return {
+      title: `${label} — not run yet`,
+      cardClass: "",
+      body: <p style={{ color: "var(--ink-60)" }}>This stage hasn&apos;t run yet.</p>,
+    };
+  }
+  if (state === "bad" && displayStage === run.failed_stage) {
+    return {
+      title: `${label} — failed`,
+      cardClass: "bad",
+      body: <p style={{ color: "var(--ink-60)" }}>This stage failed — see the error above.</p>,
+    };
+  }
+
+  if (displayStage === "plan") {
+    return {
+      title: `${label} — output`,
+      cardClass: "",
+      body: run.plan_text ? (
+        <div className="log" style={{ whiteSpace: "pre-wrap" }}>{run.plan_text}</div>
+      ) : (
+        <p style={{ color: "var(--ink-60)" }}>No plan text recorded.</p>
+      ),
+    };
+  }
+  if (displayStage === "execute") {
+    return {
+      title: `${label} — diff`,
+      cardClass: "",
+      body: run.diff_text !== null ? <DiffView diff={run.diff_text} /> : <p style={{ color: "var(--ink-60)" }}>No diff recorded.</p>,
+    };
+  }
+  return {
+    title: `${label} — verdict: ${run.verdict ?? "—"}`,
+    cardClass: run.verdict === "APPROVE" ? "highlight" : run.verdict === "NEEDS_CHANGES" ? "bad" : "",
+    body: <p style={{ whiteSpace: "pre-wrap" }}>{run.review_reasoning ?? "No review reasoning recorded."}</p>,
+  };
+}
+
 function fmtMs(ms: number | null): string {
   if (ms === null) return "—";
   if (ms < 1000) return `${ms}ms`;
@@ -147,6 +205,7 @@ export default function RunView({ runId }: { runId: string }) {
   const [run, setRun] = useState<Run | null>(null);
   const [planDraft, setPlanDraft] = useState("");
   const [log, setLog] = useState<Record<Stage, string[]>>({ plan: [], execute: [], review: [] });
+  const [selectedStep, setSelectedStep] = useState<Stage | null>(null);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [connection, setConnection] = useState<"connecting" | "open" | "error">("connecting");
@@ -262,6 +321,15 @@ export default function RunView({ runId }: { runId: string }) {
   const canCancel = ["planning", "awaiting_approval", "executing", "reviewing"].includes(run.status);
   const planDirty = planDraft !== (run.plan_original_text ?? "");
 
+  const failedOrCancelled = run.status === "failed" || run.status === "cancelled";
+  const activeStage = failedOrCancelled && run.failed_stage ? run.failed_stage : currentStage(run.status);
+  const displayStage = selectedStep ?? activeStage;
+  const isDisplayStageLive =
+    displayStage === activeStage && (run.status === "planning" || run.status === "executing" || run.status === "reviewing");
+  // The approval editor already covers Plan's detail while awaiting approval — no need for a second card.
+  const skipDetailCard = run.status === "awaiting_approval" && displayStage === "plan";
+  const detail = skipDetailCard ? null : stepDetail(displayStage, run, log, isDisplayStageLive);
+
   return (
     <div className="layout-with-sidebar">
       <aside className="sidebar">
@@ -281,18 +349,28 @@ export default function RunView({ runId }: { runId: string }) {
         <HeartbeatIndicator connection={connection} lastEventAt={lastEventAt} now={now} />
 
         <nav className="stepper" aria-label="Pipeline progress">
-          {STEP_ORDER.map((s) => {
+          {STEP_ORDER.map((s, i) => {
             const state = stepState(run, s.key);
+            const prevStep = STEP_ORDER[i - 1];
+            const prevDone = prevStep !== undefined && stepState(run, prevStep.key) === "done";
             const sub =
               state === "done" ? "done" : state === "active" ? "in progress…" : state === "bad" ? "failed" : "pending";
             return (
-              <div key={s.key} className={`step ${state}`}>
-                <span className="dot">{state === "done" ? "✓" : state === "bad" ? "✕" : STEP_ORDER.findIndex((x) => x.key === s.key) + 1}</span>
+              <button
+                key={s.key}
+                type="button"
+                className={`step ${state}`}
+                aria-pressed={displayStage === s.key}
+                onClick={() => setSelectedStep(s.key)}
+              >
+                {i > 0 && <span className={`step-line top ${prevDone ? "done" : ""}`} />}
+                {i < STEP_ORDER.length - 1 && <span className={`step-line bottom ${state === "done" ? "done" : ""}`} />}
+                <span className="dot">{state === "done" ? "✓" : state === "bad" ? "✕" : i + 1}</span>
                 <span className="label">
-                  {s.label}
+                  <span className="title">{s.label}</span>
                   <span className="sub">{sub}</span>
                 </span>
-              </div>
+              </button>
             );
           })}
         </nav>
@@ -366,28 +444,11 @@ export default function RunView({ runId }: { runId: string }) {
           </div>
         )}
 
-        {(run.status === "planning" || run.status === "executing" || run.status === "reviewing") && (
-          <div className="card">
-            <h3>{run.status === "planning" ? "Plan" : run.status === "executing" ? "Execute" : "Review"} — live output</h3>
-            <div className="log">
-              {(log[run.status === "planning" ? "plan" : run.status === "executing" ? "execute" : "review"].join(
-                "\n",
-              ) || "waiting for output…")}
-            </div>
+        {detail && (
+          <div className={`card ${detail.cardClass}`}>
+            <h3>{detail.title}</h3>
+            {detail.body}
           </div>
-        )}
-
-        {(run.status === "approved" || run.status === "needs_changes" || run.status === "closed_needs_changes") && (
-          <>
-            <div className={`card ${run.verdict === "APPROVE" ? "highlight" : "bad"}`}>
-              <h3>Review verdict: {run.verdict}</h3>
-              <p style={{ whiteSpace: "pre-wrap" }}>{run.review_reasoning}</p>
-            </div>
-            <div className="card">
-              <h3>Diff</h3>
-              <DiffView diff={run.diff_text ?? ""} />
-            </div>
-          </>
         )}
 
         {(run.plan_duration_ms !== null || run.execute_duration_ms !== null || run.review_duration_ms !== null) && (
