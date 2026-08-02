@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { parseVerdict, runClaude } from "../cli/claude";
 import { runOpenCode } from "../cli/opencode";
-import { computeDiff, createRunWorktree, removeRunWorktree, writePlanFileAndCommit } from "../git";
+import {
+  commitExecuteChanges,
+  computeDiff,
+  createRunWorktree,
+  removeRunWorktree,
+  writePlanFileAndCommit,
+} from "../git";
 import { createRun, getRun, type Run, type RunStatus, updateRun } from "../db";
 import {
   RunCancelledError,
@@ -123,8 +129,8 @@ export async function approveRun(runId: string, finalPlanText: string): Promise<
     return;
   }
 
-  updateRun(runId, { plan_text: finalPlanText });
-  await writePlanFileAndCommit(run.worktree_path, finalPlanText);
+  const planCommitSha = await writePlanFileAndCommit(run.worktree_path, finalPlanText);
+  updateRun(runId, { plan_text: finalPlanText, plan_commit_sha: planCommitSha });
   await runExecuteAndReview(runId, finalPlanText, undefined);
 }
 
@@ -156,8 +162,11 @@ async function runExecuteAndReview(
       execute_cost_usd: executeResult.costUsd,
     });
 
-    const diffText = await computeDiff(worktreePath);
+    const diffText = await computeDiff(worktreePath, run.plan_commit_sha!);
     updateRun(runId, { diff_text: diffText });
+    // Bugfix: without this, Execute's edits only ever exist as uncommitted worktree state, and
+    // get silently discarded by removeRunWorktree the moment the run reaches a terminal state.
+    await commitExecuteChanges(worktreePath);
 
     stage = "review";
     throwIfCancelled(runId);

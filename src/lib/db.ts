@@ -24,6 +24,7 @@ export interface Run {
   branch_name: string;
   worktree_path: string | null;
   auto_approve: 0 | 1;
+  plan_commit_sha: string | null;
   plan_text: string | null;
   plan_original_text: string | null;
   diff_text: string | null;
@@ -54,6 +55,13 @@ function dbPath(): string {
   return join(homedir(), ".orchestrator", "history.db");
 }
 
+/** Minimal migration helper — adds a column to an existing table if it isn't there yet. */
+function addColumnIfMissing(db: DatabaseSync, table: string, column: string, type: string): void {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as unknown as { name: string }[];
+  if (columns.some((c) => c.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+}
+
 let instance: DatabaseSync | null = null;
 
 export function getDb(): DatabaseSync {
@@ -74,6 +82,7 @@ export function getDb(): DatabaseSync {
       branch_name TEXT NOT NULL,
       worktree_path TEXT,
       auto_approve INTEGER NOT NULL DEFAULT 1,
+      plan_commit_sha TEXT,
       plan_text TEXT,
       plan_original_text TEXT,
       diff_text TEXT,
@@ -103,6 +112,8 @@ export function getDb(): DatabaseSync {
       last_used_at TEXT NOT NULL
     );
   `);
+
+  addColumnIfMissing(db, "runs", "plan_commit_sha", "TEXT");
 
   instance = db;
   return db;

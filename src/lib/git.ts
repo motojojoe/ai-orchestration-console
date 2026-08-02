@@ -67,18 +67,43 @@ export async function removeRunWorktree(projectPath: string, worktreePath: strin
   await runGit(["worktree", "remove", "--force", worktreePath], projectPath);
 }
 
-/** Spec §4: plan file is committed as the first commit on the run's branch. */
-export async function writePlanFileAndCommit(worktreePath: string, planText: string): Promise<void> {
+/** Spec §4: plan file is committed as the first commit on the run's branch. Returns that commit's SHA. */
+export async function writePlanFileAndCommit(worktreePath: string, planText: string): Promise<string> {
   const orchestratorDir = join(worktreePath, ".orchestrator");
   if (!existsSync(orchestratorDir)) mkdirSync(orchestratorDir, { recursive: true });
   writeFileSync(join(orchestratorDir, "plan.md"), planText, "utf-8");
 
   await runGit(["add", ".orchestrator/plan.md"], worktreePath);
   await runGit(["commit", "-m", "orchestrator: add plan"], worktreePath);
+  const { stdout } = await runGit(["rev-parse", "HEAD"], worktreePath);
+  return stdout.trim();
 }
 
-/** Spec §3.2: OpenCode reports no aggregate diff, so we compute it ourselves. */
-export async function computeDiff(worktreePath: string): Promise<string> {
-  const { stdout } = await runGit(["diff", "HEAD"], worktreePath);
+/**
+ * Spec §3.2: OpenCode reports no aggregate diff, so we compute it ourselves — always against the
+ * plan commit specifically (not a moving HEAD), so a retry's diff is still the full cumulative
+ * change from the plan, not just what the latest Execute attempt added on its own.
+ *
+ * Stages everything first: plain `git diff` silently omits brand-new untracked files (e.g. a file
+ * Execute created from scratch), which would show Review an incomplete — or entirely empty — diff
+ * for exactly the changes that most need checking. Staging is otherwise harmless here; the actual
+ * commit happens right after in `commitExecuteChanges`.
+ */
+export async function computeDiff(worktreePath: string, baseRef: string): Promise<string> {
+  await runGit(["add", "-A"], worktreePath);
+  const { stdout } = await runGit(["diff", "--cached", baseRef], worktreePath);
   return stdout;
+}
+
+/**
+ * Commits whatever Execute changed (already staged by `computeDiff`). Without this, those edits
+ * only ever exist as uncommitted worktree state — `removeRunWorktree` would silently discard them
+ * the moment the run reaches a terminal state, leaving only the plan on the branch. Returns
+ * whether there was anything to commit (Execute may legitimately make no changes).
+ */
+export async function commitExecuteChanges(worktreePath: string): Promise<boolean> {
+  const { stdout: status } = await runGit(["status", "--porcelain"], worktreePath);
+  if (!status.trim()) return false;
+  await runGit(["commit", "-m", "orchestrator: execute changes"], worktreePath);
+  return true;
 }
