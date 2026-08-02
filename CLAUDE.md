@@ -1,0 +1,114 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+A local, single-user web console that runs a fixed 3-stage pipeline against a project directory on
+this machine: **Plan** (Claude Code, headless) → **Execute** (OpenCode, free model) → **Review**
+(Claude Code, headless). See [`SPEC.md`](SPEC.md) for the full behavioral spec and
+[`docs/wayfinder/`](docs/wayfinder/map.md) for the decision trail it was compiled from — read
+`SPEC.md` before changing pipeline behavior; it documents *why* things work the way they do, not
+just what the code does.
+
+## Commands
+
+```bash
+npm install      # also wires up the secretlint pre-commit hook via husky
+npm run dev      # start the app at http://localhost:3000 (hot-reloads on save)
+npm run build    # production build
+npm run start    # run a production build
+npm run typecheck  # tsc --noEmit — run this after any change, no test suite exists yet
+```
+
+No automated test suite exists in this repo. Verification so far has been manual: run the dev
+server, start a real pipeline run against a throwaway git repo, and check the result.
+
+Config via environment variables:
+- `ORCHESTRATOR_DB_PATH` — SQLite file location, defaults to `~/.orchestrator/history.db`.
+- `ORCHESTRATOR_OPENCODE_MODEL` — Execute stage's model, defaults to
+  `opencode/deepseek-v4-flash-free`.
+
+## Architecture
+
+### The pipeline is a state machine in `src/lib/orchestrator/pipeline.ts`
+
+This is the file to read first. `startRun` → `approveRun` → `runExecuteAndReview` (also entered
+directly by `retryExecute`) walks a run through `planning → awaiting_approval → executing →
+reviewing → approved | needs_changes → closed_needs_changes`, or `failed`/`cancelled` from any
+point. Every status transition goes through `setStatus`, which both writes to SQLite and emits an
+SSE event — the DB row is the single source of truth; the frontend never holds state the backend
+doesn't already have.
+
+`src/lib/orchestrator/control.ts` and `src/lib/orchestrator/events.ts` are the supporting
+machinery: `control.ts` tracks each run's currently-live child process (for cancellation and
+per-stage timeouts) and a cancelled-runs flag that `runStage`/`throwIfCancelled` check explicitly
+— cancellation is **not** inferred from a process's exit code, because OpenCode exits 0 on SIGTERM
+(a "clean" exit in its own eyes). `events.ts` is an in-memory pub-sub the SSE route
+(`src/app/api/runs/[id]/events/route.ts`) subscribes to.
+
+**Both of those files stash their module state on `globalThis` instead of a plain module-level
+variable — this is load-bearing, not stylistic.** Next.js dev-mode hot-reload can re-evaluate a
+file's top level independently per route, so the route that starts a run and the route that later
+subscribes to its SSE stream (or tries to cancel it) don't reliably get the same module instance.
+A plain `const emitters = new Map()` silently fragments into separate Maps that never see each
+other's writes — this was a real, fully-reproduced bug (see git history: "Fix real-time updates
+never arriving over SSE"). Any new run-scoped in-memory state needs the same `globalThis` stashing
+pattern, or it will intermittently and silently stop working under dev-mode hot-reload.
+
+### CLI invocation: `src/lib/cli/`
+
+`process.ts` is a shared `spawnAndStreamNdjson` helper both CLIs use — it feeds a prompt over
+stdin (not argv, to avoid `ARG_MAX` issues with large diffs/plans) and parses stdout as
+newline-delimited JSON. `claude.ts` and `opencode.ts` each know their own CLI's flags and event
+shapes on top of that:
+
+- Plan runs `claude --print --permission-mode plan ...` — Claude literally cannot write files in
+  this mode, so the backend (not Claude) writes `.orchestrator/plan.md` after capturing Plan's
+  final `result` event text.
+- Review runs with `--allowedTools "Read Grep Glob"` and a **fresh session** — it never resumes
+  Plan's session, and is fed the plan text + diff directly in the prompt rather than exploring on
+  its own, so its `VERDICT: APPROVE`/`NEEDS_CHANGES` reflects only what's actually written down.
+- Execute (`opencode.ts`) runs with `--dangerously-skip-permissions`. This isn't optional: OpenCode
+  has no TTY in this context to answer its own tool-permission prompts, so without that flag every
+  run just hangs until the stage timeout.
+
+### Git mechanics: `src/lib/git.ts`
+
+Each run gets an isolated **git worktree** (`createRunWorktree`), never an in-place branch
+checkout, so the pipeline never disturbs whatever the user has open in an editor. Three things here
+are non-obvious and were each the source of a real bug:
+
+- `computeDiff` runs `git add -A` before diffing. Plain `git diff` silently omits brand-new
+  untracked files, so a file Execute created from scratch would otherwise be invisible to Review.
+- `computeDiff` always diffs against `plan_commit_sha` (stored on the run row), never a moving
+  `HEAD` — otherwise a retry's diff would only show the incremental change since the last attempt,
+  not the full cumulative diff Review is supposed to check against Acceptance Criteria.
+- `commitExecuteChanges` must run (and does, in `pipeline.ts`, right after `computeDiff`) **before**
+  a run can reach a terminal state. `removeRunWorktree` deletes the worktree directory outright on
+  cleanup — any of Execute's edits that were never committed to the branch are gone, not just
+  hidden. This actually happened to a real run before the fix; recovery required re-applying the
+  diff text saved in the DB by hand.
+
+No auto-merge, ever (`git.ts` has no merge function) — a reviewed branch is left for the user to
+merge through their own normal git workflow.
+
+### Data layer: `src/lib/db.ts`
+
+Uses Node's built-in `node:sqlite` (`DatabaseSync`), not `better-sqlite3` — the native module
+failed to compile against this machine's Node version, and the built-in avoids native compilation
+entirely. Schema changes go through `addColumnIfMissing` (a minimal `ALTER TABLE` migration
+helper) rather than dropping/recreating the table, since real run history needs to survive schema
+changes.
+
+### Frontend
+
+`src/components/RunView.tsx` is the only stateful client component of consequence — it holds the
+current `Run` row (re-fetched over plain HTTP whenever an SSE `status_change` event arrives, not
+computed from SSE payloads directly) plus a per-stage live log built from forwarded `cli_event`
+payloads. All three GET route handlers under `src/app/api/` are marked
+`dynamic = "force-dynamic"` deliberately — without it, a polling/refetching client can observe a
+cached response even after the real underlying state has already changed.
+
+Desktop notifications (`src/lib/notify.ts`) fire on stage failure/timeout and on run completion,
+gated on `Notification.permission`, requested once on page load.
