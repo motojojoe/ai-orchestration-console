@@ -1,0 +1,655 @@
+<title>Approval Gate — 3 variants</title>
+<!--
+PROTOTYPE — throwaway. Answers: "what should the approval-gate screen (before the
+Execute stage runs) look like, and what can the user do on it?" for ticket 04 of the
+AI Orchestration Console map.
+
+Three variants, switchable via ?variant=a|b|c and the floating bottom bar:
+  A — Document   : plan rendered as a single readable doc, minimal chrome.
+  B — Dashboard  : sidebar metadata + pipeline stepper, plan broken into scan-able cards.
+  C — Composer   : editable plan text in a terminal/editor-styled workspace.
+
+No backend — plan content, run metadata, and the auto-approve toggle are static
+in-memory data.  This is a standalone HTML mock (no real Next.js app exists yet —
+the map is still at spec stage), standing in for the sub-shape-B throwaway route
+UI.md describes.
+-->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  /* ---------- tokens ---------- */
+  :root {
+    --paper: #F1F3F5;       /* cool off-white ground, not warm cream */
+    --ink: #161A20;         /* blue-charcoal, near-black */
+    --ink-60: rgba(22,26,32,.6);
+    --ink-35: rgba(22,26,32,.35);
+    --line: rgba(22,26,32,.12);
+    --surface: #FFFFFF;
+    --surface-sunken: #E7EAED;
+
+    --accent: #C97F1E;      /* amber gate-light, darkened for AA on paper */
+    --accent-strong: #A8690F;
+    --accent-ink: #2E1C02;
+    --accent-wash: rgba(201,127,30,.12);
+
+    --good: #1F8F63;
+    --good-wash: rgba(31,143,99,.12);
+    --bad: #C43B3B;
+    --bad-wash: rgba(196,59,59,.10);
+
+    --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+
+    color-scheme: light dark;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #14171C;
+      --ink: #E9ECEF;
+      --ink-60: rgba(233,236,239,.62);
+      --ink-35: rgba(233,236,239,.38);
+      --line: rgba(233,236,239,.14);
+      --surface: #1B1F26;
+      --surface-sunken: #101317;
+
+      --accent: #E8A33D;
+      --accent-strong: #F2B85C;
+      --accent-ink: #2E1C02;
+      --accent-wash: rgba(232,163,61,.14);
+
+      --good: #3FB88B;
+      --good-wash: rgba(63,184,139,.14);
+      --bad: #E15252;
+      --bad-wash: rgba(225,82,82,.14);
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #14171C; --ink: #E9ECEF; --ink-60: rgba(233,236,239,.62); --ink-35: rgba(233,236,239,.38);
+    --line: rgba(233,236,239,.14); --surface: #1B1F26; --surface-sunken: #101317;
+    --accent: #E8A33D; --accent-strong: #F2B85C; --accent-ink: #2E1C02; --accent-wash: rgba(232,163,61,.14);
+    --good: #3FB88B; --good-wash: rgba(63,184,139,.14); --bad: #E15252; --bad-wash: rgba(225,82,82,.14);
+  }
+  :root[data-theme="light"] {
+    --paper: #F1F3F5; --ink: #161A20; --ink-60: rgba(22,26,32,.6); --ink-35: rgba(22,26,32,.35);
+    --line: rgba(22,26,32,.12); --surface: #FFFFFF; --surface-sunken: #E7EAED;
+    --accent: #C97F1E; --accent-strong: #A8690F; --accent-ink: #2E1C02; --accent-wash: rgba(201,127,30,.12);
+    --good: #1F8F63; --good-wash: rgba(31,143,99,.12); --bad: #C43B3B; --bad-wash: rgba(196,59,59,.10);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-ui);
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+  }
+  h1, h2, h3 { text-wrap: balance; margin: 0; }
+  button { font-family: inherit; cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .screen { display: none; min-height: 100vh; }
+  .screen.active { display: block; }
+  .mono { font-family: var(--font-mono); }
+
+  /* ---------- shared bits ---------- */
+  .eyebrow {
+    font-size: .72rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--ink-60);
+  }
+  .pill {
+    display: inline-flex; align-items: center; gap: .4em;
+    font-size: .78rem; font-weight: 600; padding: .28em .7em; border-radius: 999px;
+    font-family: var(--font-mono);
+  }
+  .pill-pending { background: var(--surface-sunken); color: var(--ink-60); }
+  .pill-active  { background: var(--accent-wash); color: var(--accent-strong); }
+  .pill-done    { background: var(--good-wash); color: var(--good); }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: .5em;
+    border-radius: 8px; border: 1px solid transparent; font-weight: 600; font-size: .92rem;
+    padding: .72em 1.15em; transition: filter .12s ease, background .12s ease;
+  }
+  .btn:hover { filter: brightness(1.06); }
+  .btn-primary { background: var(--accent); color: var(--accent-ink); }
+  .btn-ghost { background: transparent; color: var(--ink); border-color: var(--line); }
+  .btn-ghost:hover { background: var(--surface-sunken); }
+  .btn-danger-ghost { background: transparent; color: var(--bad); border-color: var(--line); }
+  .btn-danger-ghost:hover { background: var(--bad-wash); }
+
+  .toggle { display: inline-flex; align-items: center; gap: .6em; font-size: .86rem; color: var(--ink-60); }
+  .switch { position: relative; width: 38px; height: 22px; flex: none; }
+  .switch input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+  .switch .track {
+    position: absolute; inset: 0; background: var(--surface-sunken); border: 1px solid var(--line);
+    border-radius: 999px; transition: background .15s ease;
+  }
+  .switch .thumb {
+    position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%;
+    background: var(--surface); box-shadow: 0 1px 2px rgba(0,0,0,.25); transition: transform .15s ease;
+  }
+  .switch input:checked + .track { background: var(--accent); border-color: var(--accent); }
+  .switch input:checked + .track + .thumb { transform: translateX(16px); }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+  }
+
+  /* ================= VARIANT A — Document ================= */
+  .screen-a { padding: 4.5rem 1.5rem 8rem; }
+  .a-wrap { max-width: 640px; margin: 0 auto; }
+  .a-meta { display: flex; gap: .6rem; align-items: center; margin-bottom: 1.4rem; font-size: .82rem; color: var(--ink-60); }
+  .a-meta .mono { color: var(--ink); }
+  .a-meta .sep { color: var(--ink-35); }
+  .a-title { font-size: 1.9rem; font-weight: 700; line-height: 1.22; margin-bottom: .35rem; }
+  .a-objective { font-size: 1.05rem; color: var(--ink-60); line-height: 1.55; margin-bottom: 2.6rem; }
+  .a-section { margin-bottom: 2.2rem; }
+  .a-section h2 {
+    font-size: .78rem; font-weight: 700; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--ink-60); margin-bottom: .8rem;
+  }
+  .a-section p { line-height: 1.65; margin: 0; color: var(--ink); }
+  .a-steps { margin: 0; padding: 0; list-style: none; counter-reset: step; }
+  .a-steps li {
+    counter-increment: step; display: flex; gap: .85rem; padding: .55rem 0;
+    border-top: 1px solid var(--line); line-height: 1.55;
+  }
+  .a-steps li:first-child { border-top: none; }
+  .a-steps li::before {
+    content: counter(step); flex: none; width: 1.5rem; height: 1.5rem; border-radius: 50%;
+    background: var(--surface-sunken); color: var(--ink-60); font-size: .78rem; font-weight: 700;
+    display: flex; align-items: center; justify-content: center; font-family: var(--font-mono);
+  }
+  .a-criteria {
+    border: 1px solid var(--line); border-left: 3px solid var(--good); border-radius: 8px;
+    padding: 1rem 1.2rem; background: var(--surface);
+  }
+  .a-criteria ul, .a-outscope ul { margin: 0; padding: 0; list-style: none; }
+  .a-criteria li { display: flex; gap: .6rem; padding: .35rem 0; line-height: 1.5; }
+  .a-criteria li::before { content: "○"; color: var(--good); flex: none; }
+  .a-outscope {
+    border: 1px dashed var(--line); border-radius: 8px; padding: 1rem 1.2rem; color: var(--ink-60);
+  }
+  .a-outscope li { display: flex; gap: .6rem; padding: .3rem 0; line-height: 1.5; font-size: .93rem; }
+  .a-outscope li::before { content: "–"; flex: none; }
+  .a-bar {
+    position: fixed; left: 0; right: 0; bottom: 0; padding: 1rem 1.5rem;
+    background: color-mix(in srgb, var(--paper) 92%, transparent); backdrop-filter: blur(10px);
+    border-top: 1px solid var(--line);
+    display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  }
+  .a-bar-inner { max-width: 640px; margin: 0 auto; width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+  .a-actions { display: flex; gap: .6rem; }
+
+  /* ================= VARIANT B — Dashboard ================= */
+  .screen-b { display: grid; grid-template-columns: 272px 1fr; min-height: 100vh; }
+  .b-sidebar {
+    background: var(--surface); border-right: 1px solid var(--line);
+    padding: 1.6rem 1.4rem; display: flex; flex-direction: column; gap: 1.8rem;
+    position: sticky; top: 0; height: 100vh;
+  }
+  .b-field { display: flex; flex-direction: column; gap: .3rem; }
+  .b-field .eyebrow { font-size: .68rem; }
+  .b-field .val { font-size: .9rem; }
+  .b-stepper { display: flex; flex-direction: column; gap: 0; }
+  .b-step { display: flex; gap: .7rem; padding: .5rem 0; position: relative; }
+  .b-step .dot {
+    width: 20px; height: 20px; border-radius: 50%; flex: none; display: flex; align-items: center;
+    justify-content: center; font-size: .68rem; font-weight: 700; font-family: var(--font-mono);
+    border: 2px solid var(--line); color: var(--ink-35); background: var(--surface); z-index: 1;
+  }
+  .b-step.done .dot { border-color: var(--good); color: var(--good); background: var(--good-wash); }
+  .b-step.active .dot { border-color: var(--accent); color: var(--accent-strong); background: var(--accent-wash); }
+  .b-step:not(:last-child)::before {
+    content: ""; position: absolute; left: 9px; top: 26px; bottom: -6px; width: 2px; background: var(--line);
+  }
+  .b-step .label { font-size: .86rem; padding-top: .1rem; }
+  .b-step .label .sub { display: block; font-size: .74rem; color: var(--ink-60); }
+  .b-sidebar-actions { margin-top: auto; display: flex; flex-direction: column; gap: .7rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+  .b-sidebar-actions .btn { width: 100%; }
+
+  .b-main { padding: 2.2rem 2.4rem 3rem; max-width: 760px; }
+  .b-heading { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 1.6rem; gap: 1rem; }
+  .b-heading h1 { font-size: 1.5rem; font-weight: 700; }
+  .b-card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+    padding: 1.3rem 1.4rem; margin-bottom: 1rem;
+  }
+  .b-card h3 { font-size: .74rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-60); margin-bottom: .7rem; }
+  .b-card p { margin: 0; line-height: 1.6; }
+  .b-card.highlight { border-color: var(--good); background: var(--good-wash); }
+  .b-card.highlight h3 { color: var(--good); }
+  .b-card.muted { background: var(--surface-sunken); border-style: dashed; }
+  .b-checklist { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: .5rem; }
+  .b-checklist li { display: flex; gap: .7rem; align-items: flex-start; font-size: .93rem; line-height: 1.55; }
+  .b-checklist .n { font-family: var(--font-mono); font-size: .78rem; color: var(--ink-35); flex: none; padding-top: .15rem; }
+  .b-card.highlight ul, .b-card.muted ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: .4rem; }
+  .b-card.highlight li, .b-card.muted li { font-size: .9rem; line-height: 1.55; }
+
+  /* ================= VARIANT C — Composer ================= */
+  .screen-c { min-height: 100vh; display: flex; flex-direction: column; background: var(--surface-sunken); }
+  .c-tabbar { display: flex; align-items: center; gap: 0; background: var(--surface); border-bottom: 1px solid var(--line); padding: 0 .6rem; }
+  .c-tab {
+    font-family: var(--font-mono); font-size: .82rem; padding: .8rem 1rem; color: var(--ink-60);
+    border-bottom: 2px solid transparent;
+  }
+  .c-tab.on { color: var(--ink); border-bottom-color: var(--accent); background: var(--surface-sunken); }
+  .c-body { flex: 1; display: grid; grid-template-columns: 1fr 300px; gap: 1px; background: var(--line); overflow: hidden; }
+  .c-editor-pane { background: var(--surface); display: flex; flex-direction: column; }
+  .c-editor-head { padding: .7rem 1rem; font-size: .74rem; color: var(--ink-60); border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; }
+  .c-editor {
+    flex: 1; border: none; resize: none; background: var(--surface); color: var(--ink);
+    font-family: var(--font-mono); font-size: .87rem; line-height: 1.7; padding: 1.2rem 1.4rem;
+    tab-size: 2;
+  }
+  .c-side { background: var(--surface); padding: 1.2rem; display: flex; flex-direction: column; gap: 1.3rem; overflow-y: auto; }
+  .c-side .b-field { display: flex; flex-direction: column; gap: .25rem; }
+  .c-flag { font-family: var(--font-mono); font-size: .82rem; display: flex; align-items: center; gap: .5rem; color: var(--ink-60); }
+  .c-flag .lit { color: var(--accent-strong); }
+  .c-statusbar {
+    background: var(--ink); color: var(--paper); font-family: var(--font-mono); font-size: .76rem;
+    padding: .5rem 1rem; display: flex; justify-content: space-between; align-items: center;
+  }
+  :root[data-theme="dark"] .c-statusbar, @media (prefers-color-scheme: dark) { }
+  .c-statusbar .right { display: flex; gap: 1.2rem; align-items: center; }
+  .c-run-btn {
+    font-family: var(--font-mono); background: var(--accent); color: var(--accent-ink);
+    border: none; border-radius: 6px; padding: .55rem 1rem; font-size: .84rem; font-weight: 700;
+  }
+  .c-dirty { font-size: .72rem; color: var(--accent-strong); font-family: var(--font-mono); }
+
+  /* ================= VARIANT D — Hybrid (B's sidebar/stepper + C's editable plan) ================= */
+  .screen-d { display: grid; grid-template-columns: 272px 1fr; min-height: 100vh; }
+  .d-editor-card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .d-editor-card-head {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 1rem;
+    padding: 1rem 1.3rem .8rem;
+  }
+  .d-editor-card-head h3 { font-size: .74rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-60); }
+  .d-editor-hint { font-size: .78rem; color: var(--ink-60); padding: 0 1.3rem .9rem; margin: 0; border-bottom: 1px solid var(--line); }
+  .d-editor {
+    border: none; background: transparent; color: var(--ink); font-family: var(--font-mono);
+    font-size: .87rem; line-height: 1.75; padding: 1.1rem 1.3rem 1.4rem; min-height: 480px;
+    resize: vertical; width: 100%;
+  }
+
+  /* ---------- floating switcher ---------- */
+  .switcher {
+    position: fixed; left: 50%; bottom: 1.1rem; transform: translateX(-50%); z-index: 999;
+    display: flex; align-items: center; gap: .15rem;
+    background: var(--ink); color: var(--paper);
+    border-radius: 999px; padding: .35rem; box-shadow: 0 8px 24px rgba(0,0,0,.35);
+    font-family: var(--font-mono); font-size: .8rem;
+  }
+  .switcher button {
+    background: transparent; border: none; color: var(--paper); width: 28px; height: 28px;
+    border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 1rem;
+  }
+  .switcher button:hover { background: rgba(255,255,255,.14); }
+  .switcher .label { padding: 0 .6rem; white-space: nowrap; }
+  .switcher .label b { color: var(--accent-strong); }
+</style>
+
+<!-- ================= VARIANT A ================= -->
+<section class="screen screen-a" id="screen-a">
+  <div class="a-wrap">
+    <div class="a-meta">
+      <span class="mono">acme-storefront</span><span class="sep">·</span>
+      <span class="mono">orchestrator/run-2043</span><span class="sep">·</span>
+      <span class="pill pill-active">plan ready</span>
+    </div>
+    <h1 class="a-title">Add rate limiting to the public API</h1>
+    <p class="a-objective">Prevent abuse of public API endpoints by capping requests at 100 per minute per IP.</p>
+
+    <div class="a-section">
+      <h2>Context</h2>
+      <p>Support flagged repeated scraping — a small set of IPs hitting <code class="mono">/api/products</code> every few milliseconds. No rate limiting exists today; the middleware layer is the natural place to add it.</p>
+    </div>
+
+    <div class="a-section">
+      <h2>Steps</h2>
+      <ol class="a-steps">
+        <li>Add a <code class="mono">rateLimit</code> middleware using a sliding-window counter backed by an in-memory LRU cache.</li>
+        <li>Apply the middleware to every route under <code class="mono">/api/*</code> in <code class="mono">middleware.ts</code>.</li>
+        <li>Return <code class="mono">429 Too Many Requests</code> with a <code class="mono">Retry-After</code> header once the limit is exceeded.</li>
+        <li>Add an <code class="mono">X-RateLimit-Remaining</code> header to all API responses.</li>
+        <li>Write a test that bursts 101 requests and asserts the 101st is rejected.</li>
+      </ol>
+    </div>
+
+    <div class="a-section">
+      <h2>Acceptance criteria</h2>
+      <div class="a-criteria">
+        <ul>
+          <li>&gt;100 requests/min from one IP to any <code class="mono">/api/*</code> route returns 429 after the 100th.</li>
+          <li>Traffic under the limit is unaffected — no added latency over 5ms.</li>
+          <li>New test suite passes.</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="a-section">
+      <h2>Out of scope</h2>
+      <div class="a-outscope">
+        <ul>
+          <li>No per-user (authenticated) rate limits — IP-based only this pass.</li>
+          <li>No new infra dependency — do not introduce Redis.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="a-bar">
+    <div class="a-bar-inner">
+      <label class="toggle">
+        <span class="switch">
+          <input type="checkbox" checked aria-label="Auto-approve future runs">
+          <span class="track"></span><span class="thumb"></span>
+        </span>
+        Auto-approve future runs
+      </label>
+      <div class="a-actions">
+        <button class="btn btn-danger-ghost">Reject</button>
+        <button class="btn btn-primary">Approve &amp; run Execute</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= VARIANT B ================= -->
+<section class="screen screen-b" id="screen-b">
+  <aside class="b-sidebar">
+    <div class="b-field">
+      <span class="eyebrow">Project</span>
+      <span class="val mono">acme-storefront</span>
+    </div>
+    <div class="b-field">
+      <span class="eyebrow">Branch</span>
+      <span class="val mono">orchestrator/run-2043</span>
+    </div>
+    <div class="b-field">
+      <span class="eyebrow">Execute model</span>
+      <span class="val mono">opencode/deepseek-v4-flash-free</span>
+    </div>
+
+    <nav class="b-stepper" aria-label="Pipeline progress">
+      <div class="b-step done"><span class="dot">✓</span><span class="label">Plan<span class="sub">Claude Code · done</span></span></div>
+      <div class="b-step active"><span class="dot">2</span><span class="label">Execute<span class="sub">awaiting your approval</span></span></div>
+      <div class="b-step"><span class="dot">3</span><span class="label">Review<span class="sub">Claude Code</span></span></div>
+    </nav>
+
+    <div class="b-sidebar-actions">
+      <label class="toggle" style="justify-content:space-between;">
+        Auto-approve
+        <span class="switch">
+          <input type="checkbox" checked aria-label="Auto-approve future runs">
+          <span class="track"></span><span class="thumb"></span>
+        </span>
+      </label>
+      <button class="btn btn-primary">Approve &amp; run Execute</button>
+      <button class="btn btn-danger-ghost">Reject run</button>
+    </div>
+  </aside>
+
+  <main class="b-main">
+    <div class="b-heading">
+      <h1>Add rate limiting to the public API</h1>
+      <span class="pill pill-active">plan ready</span>
+    </div>
+
+    <div class="b-card">
+      <h3>Objective</h3>
+      <p>Prevent abuse of public API endpoints by capping requests at 100 per minute per IP.</p>
+    </div>
+
+    <div class="b-card">
+      <h3>Context</h3>
+      <p>Support flagged repeated scraping — a small set of IPs hitting <code class="mono">/api/products</code> every few milliseconds. No rate limiting exists today.</p>
+    </div>
+
+    <div class="b-card">
+      <h3>Steps</h3>
+      <ul class="b-checklist">
+        <li><span class="n">01</span><span>Add a <code class="mono">rateLimit</code> middleware — sliding-window counter, in-memory LRU cache.</span></li>
+        <li><span class="n">02</span><span>Apply to every route under <code class="mono">/api/*</code> in <code class="mono">middleware.ts</code>.</span></li>
+        <li><span class="n">03</span><span>Return <code class="mono">429</code> with <code class="mono">Retry-After</code> once exceeded.</span></li>
+        <li><span class="n">04</span><span>Add <code class="mono">X-RateLimit-Remaining</code> to all API responses.</span></li>
+        <li><span class="n">05</span><span>Test: burst 101 requests, assert the 101st is rejected.</span></li>
+      </ul>
+    </div>
+
+    <div class="b-card highlight">
+      <h3>Acceptance criteria</h3>
+      <ul>
+        <li>&gt;100 req/min from one IP → 429 after the 100th.</li>
+        <li>Under-limit traffic unaffected, &lt;5ms added latency.</li>
+        <li>New test suite passes.</li>
+      </ul>
+    </div>
+
+    <div class="b-card muted">
+      <h3>Out of scope</h3>
+      <ul>
+        <li>No per-user rate limits — IP-based only.</li>
+        <li>No new infra — do not introduce Redis.</li>
+      </ul>
+    </div>
+  </main>
+</section>
+
+<!-- ================= VARIANT C ================= -->
+<section class="screen screen-c" id="screen-c">
+  <div class="c-tabbar">
+    <div class="c-tab on">.orchestrator/plan.md</div>
+    <div class="c-tab">git diff — pending</div>
+  </div>
+  <div class="c-body">
+    <div class="c-editor-pane">
+      <div class="c-editor-head">
+        <span>orchestrator/run-2043 · editable before Execute runs</span>
+        <span class="c-dirty" id="dirtyFlag" hidden>● edited</span>
+      </div>
+      <textarea class="c-editor mono" id="planEditor" spellcheck="false"># Add rate limiting to the public API
+
+## Objective
+Prevent abuse of public API endpoints by capping requests at 100 per minute per IP.
+
+## Context
+Support flagged repeated scraping — a small set of IPs hitting /api/products
+every few milliseconds. No rate limiting exists today; the middleware layer
+is the natural place to add it.
+
+## Steps
+1. Add a rateLimit middleware using a sliding-window counter backed by an
+   in-memory LRU cache.
+2. Apply the middleware to every route under /api/* in middleware.ts.
+3. Return 429 Too Many Requests with a Retry-After header once exceeded.
+4. Add an X-RateLimit-Remaining header to all API responses.
+5. Write a test that bursts 101 requests and asserts the 101st is rejected.
+
+## Acceptance criteria
+- >100 requests/min from one IP to any /api/* route returns 429 after the 100th.
+- Traffic under the limit is unaffected — no added latency over 5ms.
+- New test suite passes.
+
+## Out of scope
+- No per-user (authenticated) rate limits — IP-based only this pass.
+- No new infra dependency — do not introduce Redis.
+</textarea>
+    </div>
+    <div class="c-side">
+      <div class="b-field">
+        <span class="eyebrow">Project</span>
+        <span class="val mono">acme-storefront</span>
+      </div>
+      <div class="b-field">
+        <span class="eyebrow">Execute model</span>
+        <span class="val mono">opencode/deepseek-v4-flash-free</span>
+      </div>
+      <div class="b-field">
+        <span class="eyebrow">Flags</span>
+        <div class="c-flag"><span class="lit">--auto-approve</span></div>
+        <div class="c-flag"><span class="lit">--dir</span> ./acme-storefront</div>
+      </div>
+      <div class="b-field">
+        <span class="eyebrow">Auto-approve future runs</span>
+        <label class="toggle">
+          <span class="switch">
+            <input type="checkbox" checked aria-label="Auto-approve future runs">
+            <span class="track"></span><span class="thumb"></span>
+          </span>
+          on
+        </label>
+      </div>
+    </div>
+  </div>
+  <div class="c-statusbar">
+    <span>plan.md — edited before run · branch orchestrator/run-2043</span>
+    <span class="right">
+      <button class="btn btn-danger-ghost" style="color:var(--paper);border-color:rgba(255,255,255,.25);">reject</button>
+      <button class="c-run-btn">▶ opencode run</button>
+    </span>
+  </div>
+</section>
+
+<!-- ================= VARIANT D — Hybrid ================= -->
+<section class="screen screen-d" id="screen-d">
+  <aside class="b-sidebar">
+    <div class="b-field">
+      <span class="eyebrow">Project</span>
+      <span class="val mono">acme-storefront</span>
+    </div>
+    <div class="b-field">
+      <span class="eyebrow">Branch</span>
+      <span class="val mono">orchestrator/run-2043</span>
+    </div>
+    <div class="b-field">
+      <span class="eyebrow">Execute model</span>
+      <span class="val mono">opencode/deepseek-v4-flash-free</span>
+    </div>
+
+    <nav class="b-stepper" aria-label="Pipeline progress">
+      <div class="b-step done"><span class="dot">✓</span><span class="label">Plan<span class="sub">Claude Code · done</span></span></div>
+      <div class="b-step active"><span class="dot">2</span><span class="label">Execute<span class="sub">awaiting your approval</span></span></div>
+      <div class="b-step"><span class="dot">3</span><span class="label">Review<span class="sub">Claude Code</span></span></div>
+    </nav>
+
+    <div class="b-sidebar-actions">
+      <label class="toggle" style="justify-content:space-between;">
+        Auto-approve
+        <span class="switch">
+          <input type="checkbox" checked aria-label="Auto-approve future runs">
+          <span class="track"></span><span class="thumb"></span>
+        </span>
+      </label>
+      <button class="btn btn-primary">Approve &amp; run Execute</button>
+      <button class="btn btn-danger-ghost">Reject run</button>
+    </div>
+  </aside>
+
+  <main class="b-main">
+    <div class="b-heading">
+      <h1>Add rate limiting to the public API</h1>
+      <span class="pill pill-active">plan ready</span>
+    </div>
+
+    <div class="d-editor-card">
+      <div class="d-editor-card-head">
+        <h3>Plan — editable before Execute runs</h3>
+        <span class="c-dirty" id="dDirtyFlag" hidden>● edited</span>
+      </div>
+      <p class="d-editor-hint">This is <code class="mono">.orchestrator/plan.md</code> as Claude wrote it. Edit anything below — Execute uses it exactly as you leave it.</p>
+      <textarea class="d-editor mono" id="dPlanEditor" spellcheck="false">## Objective
+Prevent abuse of public API endpoints by capping requests at 100 per minute per IP.
+
+## Context
+Support flagged repeated scraping — a small set of IPs hitting /api/products
+every few milliseconds. No rate limiting exists today; the middleware layer
+is the natural place to add it.
+
+## Steps
+1. Add a rateLimit middleware using a sliding-window counter backed by an
+   in-memory LRU cache.
+2. Apply the middleware to every route under /api/* in middleware.ts.
+3. Return 429 Too Many Requests with a Retry-After header once exceeded.
+4. Add an X-RateLimit-Remaining header to all API responses.
+5. Write a test that bursts 101 requests and asserts the 101st is rejected.
+
+## Acceptance criteria
+- >100 requests/min from one IP to any /api/* route returns 429 after the 100th.
+- Traffic under the limit is unaffected — no added latency over 5ms.
+- New test suite passes.
+
+## Out of scope
+- No per-user (authenticated) rate limits — IP-based only this pass.
+- No new infra dependency — do not introduce Redis.
+</textarea>
+    </div>
+  </main>
+</section>
+
+<!-- ---------- switcher ---------- -->
+<div class="switcher" role="navigation" aria-label="Prototype variant switcher">
+  <button id="prev" aria-label="Previous variant">‹</button>
+  <span class="label" id="variantLabel">A — <b>Document</b></span>
+  <button id="next" aria-label="Next variant">›</button>
+</div>
+
+<script>
+  const variants = [
+    { key: "a", name: "Document" },
+    { key: "b", name: "Dashboard" },
+    { key: "c", name: "Composer" },
+    { key: "d", name: "Hybrid — recommended" },
+  ];
+  const params = new URLSearchParams(location.search);
+  let idx = variants.findIndex(v => v.key === (params.get("variant") || "d"));
+  if (idx === -1) idx = variants.length - 1;
+
+  const label = document.getElementById("variantLabel");
+  const screens = {
+    a: document.getElementById("screen-a"),
+    b: document.getElementById("screen-b"),
+    c: document.getElementById("screen-c"),
+    d: document.getElementById("screen-d"),
+  };
+
+  function render() {
+    const v = variants[idx];
+    Object.entries(screens).forEach(([k, el]) => el.classList.toggle("active", k === v.key));
+    label.innerHTML = v.key.toUpperCase() + " — <b>" + v.name + "</b>";
+    const url = new URL(location.href);
+    url.searchParams.set("variant", v.key);
+    history.replaceState(null, "", url);
+  }
+  function step(d) {
+    idx = (idx + d + variants.length) % variants.length;
+    render();
+  }
+  document.getElementById("prev").addEventListener("click", () => step(-1));
+  document.getElementById("next").addEventListener("click", () => step(1));
+  document.addEventListener("keydown", (e) => {
+    const tag = (e.target && e.target.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "textarea" || e.target.isContentEditable) return;
+    if (e.key === "ArrowLeft") step(-1);
+    if (e.key === "ArrowRight") step(1);
+  });
+
+  // Variant C: mark dirty when the plan text is edited.
+  const editor = document.getElementById("planEditor");
+  const dirtyFlag = document.getElementById("dirtyFlag");
+  const original = editor.value;
+  editor.addEventListener("input", () => { dirtyFlag.hidden = editor.value === original; });
+
+  const dEditor = document.getElementById("dPlanEditor");
+  const dDirtyFlag = document.getElementById("dDirtyFlag");
+  const dOriginal = dEditor.value;
+  dEditor.addEventListener("input", () => { dDirtyFlag.hidden = dEditor.value === dOriginal; });
+
+  render();
+</script>
