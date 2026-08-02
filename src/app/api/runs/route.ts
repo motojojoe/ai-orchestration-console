@@ -4,6 +4,8 @@ import { validateProject } from "@/lib/git";
 import { createNewRun, startRun } from "@/lib/orchestrator/pipeline";
 import { checkCredentials } from "@/lib/preflight";
 
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   return NextResponse.json({ runs: listRuns() });
 }

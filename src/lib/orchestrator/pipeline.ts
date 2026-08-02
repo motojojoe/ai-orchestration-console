@@ -3,7 +3,16 @@ import { parseVerdict, runClaude } from "../cli/claude";
 import { runOpenCode } from "../cli/opencode";
 import { computeDiff, createRunWorktree, removeRunWorktree, writePlanFileAndCommit } from "../git";
 import { createRun, getRun, type Run, type RunStatus, updateRun } from "../db";
-import { StageTimeoutError, clearController, gracefulStop, isCancelled, markCancelled, runStage } from "./control";
+import {
+  RunCancelledError,
+  StageTimeoutError,
+  clearController,
+  gracefulStop,
+  isCancelled,
+  markCancelled,
+  runStage,
+  throwIfCancelled,
+} from "./control";
 import { emitRunEvent } from "./events";
 import { buildExecutePrompt, buildPlanPrompt, buildReviewPrompt } from "./prompts";
 
@@ -107,6 +116,13 @@ export async function approveRun(runId: string, finalPlanText: string): Promise<
   const run = getRun(runId);
   if (!run?.worktree_path) throw new Error(`Run ${runId} has no active worktree to approve into`);
 
+  // Closes the race where auto-approve chains straight from Plan into this git commit — if cancel
+  // landed in that gap, no process was registered for gracefulStop to signal (see throwIfCancelled).
+  if (isCancelled(runId)) {
+    await failRun(runId, "plan", new RunCancelledError(`Run ${runId} was cancelled`));
+    return;
+  }
+
   updateRun(runId, { plan_text: finalPlanText });
   await writePlanFileAndCommit(run.worktree_path, finalPlanText);
   await runExecuteAndReview(runId, finalPlanText, undefined);
@@ -120,6 +136,7 @@ async function runExecuteAndReview(
 ): Promise<void> {
   let stage: "execute" | "review" = "execute";
   try {
+    throwIfCancelled(runId);
     const run = getRun(runId)!;
     const worktreePath = run.worktree_path!;
 
@@ -143,6 +160,7 @@ async function runExecuteAndReview(
     updateRun(runId, { diff_text: diffText });
 
     stage = "review";
+    throwIfCancelled(runId);
     setStatus(runId, "reviewing");
     const reviewHandle = runClaude({
       cwd: worktreePath,

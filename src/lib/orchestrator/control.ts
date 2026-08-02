@@ -27,6 +27,18 @@ export function isCancelled(runId: string): boolean {
   return cancelledRuns.has(runId);
 }
 
+/**
+ * Call before spawning a new stage. Closes the race where cancel lands in the gap between two
+ * stages (e.g. while the plan commit or diff computation is running) — at that instant there's no
+ * live process for `gracefulStop` to signal, so without this check the next stage would start
+ * anyway, unaware a cancel was ever requested.
+ */
+export function throwIfCancelled(runId: string): void {
+  if (isCancelled(runId)) {
+    throw new RunCancelledError(`Run ${runId} was cancelled`);
+  }
+}
+
 /** Spec §8: SIGTERM first, wait up to 5s, then SIGKILL. Shared by explicit cancel and stage timeouts. */
 export async function gracefulStop(runId: string): Promise<void> {
   const c = controllers.get(runId);
@@ -39,6 +51,7 @@ export async function gracefulStop(runId: string): Promise<void> {
 export const DEFAULT_STAGE_TIMEOUT_MS = 15 * 60 * 1000;
 
 export class StageTimeoutError extends Error {}
+export class RunCancelledError extends Error {}
 
 /**
  * Runs a CLI stage under the per-stage timeout (spec §8, default 15 min). Registers the stage's
@@ -62,7 +75,13 @@ export async function runStage<T>(
   });
 
   try {
-    return await Promise.race([handle.result, timeout]);
+    const result = await Promise.race([handle.result, timeout]);
+    // A killed CLI can still exit "successfully" (e.g. OpenCode catches SIGTERM and exits 0) —
+    // check the cancellation flag ourselves rather than trusting the process's own exit code.
+    if (isCancelled(runId)) {
+      throw new RunCancelledError(`Run ${runId} was cancelled`);
+    }
+    return result;
   } finally {
     controller.kill = null;
   }
