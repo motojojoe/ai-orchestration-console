@@ -11,11 +11,52 @@ this machine: **Plan** (Claude Code, headless) → **Execute** (OpenCode, free m
 `SPEC.md` before changing pipeline behavior; it documents *why* things work the way they do, not
 just what the code does.
 
+## PMB workspace routing
+
+Console implementation memory belongs to this repository's PMB workspace even when the console
+orchestrates another repository. The target path is runtime input; it does not make console design,
+defects, tests, or releases part of the target repository's memory.
+
+Before any other PMB call, use `mcp__pmb__workspace_info` through the same MCP connection that would
+read or write memory. Require `name=ai-orchestration-console` and require `root` to equal the
+canonical main-worktree root: the parent directory of the absolute common Git directory returned by
+`git rev-parse --path-format=absolute --git-common-dir`. A linked worktree must resolve to that same
+canonical identity, not to its own checkout path. The reported `id` is machine-local: require it to
+remain stable within the session, but do not hardcode it in tracked files. Only after this gate
+passes may the session call `prepare`, `recall`, or a PMB write tool. `pmb workspace current` starts
+a separate CLI process, so it is useful for resolver diagnostics but never proves the attachment of
+an already-running MCP engine. Conversely, before any mutating standalone PMB CLI command, run
+`pmb workspace current` from that command's exact working directory and require the intended
+name/root; an MCP `workspace_info` result does not attest a separate CLI process.
+
+On a mismatch, error, or unavailable `workspace_info`, make no further PMB calls and do not begin
+PMB-dependent substantive work. Immediately tell the user the expected and actual identity (or
+that the actual identity is unavailable), the blocked action, and that no PMB write was attempted.
+Recover by restarting or reconnecting a session rooted or configured for this repository, exposing
+`workspace_info`, and repeating the gate before `prepare`. A shell tool's working directory, an
+event's `project` field, and a recall filter do not retarget a running MCP server. Do not use the
+persisted global `pmb workspace use` switch while concurrent agents may be active.
+
+If one run produces both console and target-repository knowledge, split it into atomic records:
+console implementation context stays here; target code, domain, and task decisions go to the
+target repository's independently verified PMB connection.
+
+This repository does not yet have an `AGENTS.md`, so this section governs Claude Code only. Do not
+claim that Codex enforces the same fail-closed policy until a canonical Codex-visible agent document
+is explicitly approved and added.
+
 ## Git workflow
 
 This repo follows **gitflow** — never commit directly to `main`. Do work on a `feature/*` (or
 `fix/*`) branch off `develop` and merge back through a PR; `main` only receives merges from
 `develop` or release/hotfix branches.
+
+Never commit a resolved machine-local absolute path or generated local identifier. Use a
+repo-relative path, derive it at runtime, document an environment variable, or use an explicit
+placeholder instead. Portable home-relative paths such as `~/.orchestrator/history.db` and clearly
+marked placeholders are allowed; the prohibition is against real personal paths and generated
+values that silently mislead another clone, worktree, or CI environment. Secretlint does not catch
+this class of mistake, so inspect the staged diff before committing.
 
 ### Running more than one agent at a time
 
