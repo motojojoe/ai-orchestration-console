@@ -21,6 +21,11 @@ Both CLIs are single-shot agent harnesses in the same family as Claude Code and 
 follows the same question set as ticket 01, plus two questions this project cares about that ticket 01 did not
 need to ask (Q6 read-only enforcement, Q8 usage/cost reporting).
 
+**§10 records a cross-review**: each CLI was asked to review this document's claims about itself, and every
+claim either of them disputed was then re-probed. That round corrected four defects in the first revision —
+two in the Codex sections, two in the Antigravity sections — which are marked inline as corrections where
+they occur. Read §10 for the worked example of running both CLIs against the same task.
+
 ---
 
 ## 1. What flag(s) run each CLI non-interactively?
@@ -53,13 +58,15 @@ There is no `exec`-style subcommand. `agy`'s subcommands (`agent`, `models`, `pl
 
 ## 2. How does each accept its instructions — prompt string, file path, or stdin?
 
-**Answer:** **Codex accepts stdin; Antigravity does not.** Codex takes the prompt as a positional argument, as
-`-` (explicit stdin), or as piped stdin, and appends piped stdin to an argv prompt when both are present.
-Antigravity accepts the prompt **only as the value of `--print`/`-p`**, ignores stdin entirely, and errors out
-if that value is empty. Neither CLI has a "read the prompt from this file" flag.
+**Answer:** **Both accept the prompt on stdin**, but Antigravity's stdin path is easy to miss: it works only
+when `--print`/`-p` is omitted *entirely*. Codex takes the prompt as a positional argument, as `-`, or as
+piped stdin, and appends piped stdin to an argv prompt when both are present. Neither CLI has a "read the
+prompt from this file" flag.
 
-This is the single most consequential difference for this project, because `src/lib/cli/process.ts`
-deliberately feeds prompts over stdin rather than argv to avoid `ARG_MAX` limits with large plans and diffs.
+> **Correction.** An earlier revision of this document claimed Antigravity ignores stdin outright and is
+> therefore bounded by `ARG_MAX`. That was wrong, and it was wrong because every stdin probe had been run
+> *through* the `-p` flag. Antigravity's own review of this document (§10) disputed the claim; a re-probe
+> confirmed the dispute. The `ARG_MAX` concern it implied does not apply.
 
 **Detail / citations:**
 
@@ -75,13 +82,19 @@ printf 'Reply with exactly: STDIN_CODEX_OK' \
 → emitted `item.completed` with `item.text == "STDIN_CODEX_OK"`. Codex also wrote
 `Reading additional input from stdin...` to stderr, confirming it consumed the pipe.
 
-*Antigravity* — three probe runs establish the negative result:
+*Antigravity* — six probe runs map the behaviour. The decisive variable is whether `--print` appears at all:
 
 | Probe | Command | Result |
 |---|---|---|
-| Prompt in argv | `agy --output-format json -p "Reply with exactly: AGY_ARGV_OK"` | `status: "SUCCESS"`, `response: "AGY_ARGV_OK\n"` |
-| Piped stdin, `-` as value | `printf '…' \| agy --output-format json -p -` | `status: "SUCCESS"`, but the response was a generic *"Hello! I am ready to help…"* — the literal string `-` was used as the prompt and the piped text was discarded |
-| Piped stdin, empty value | `printf '…' \| agy --output-format json -p ""` | `status: "ERROR"`, `error: "Error: empty prompt. Usage: agy --print \"your prompt here\""` — stdin was not consulted |
+| Prompt in argv | `agy --output-format json -p "Reply with exactly: AGY_ARGV_OK"` | `SUCCESS`, `response: "AGY_ARGV_OK\n"` |
+| **Piped stdin, no `--print`** | `printf '…' \| agy --output-format json` | **`SUCCESS`, `response: "STDIN_A2_OK\n"` — stdin is read as the prompt** |
+| Piped stdin, `-` as value | `printf '…' \| agy --output-format json -p -` | `SUCCESS`, but a generic *"Hello! I am ready to help…"* — the literal string `-` became the prompt and the piped text was discarded |
+| Piped stdin, empty value | `printf '…' \| agy --output-format json -p ""` | `ERROR`, `"Error: empty prompt. Usage: agy --print \"your prompt here\""` |
+| Piped stdin, `--print` with no value | `printf '…' \| agy --output-format json --print` | usage/help text printed; prompt not run |
+| Piped stdin, `--print` last, no value | `printf '…' \| agy --print` | usage/help text printed; prompt not run |
+
+So the working headless forms are `agy [flags] -p "<prompt>"` (argv) **or** `… | agy [flags]` (stdin, with no
+`--print` flag). There is no way to combine a piped prompt *with* an explicit `--print`.
 
 **Flag-order footgun:** because `--print` takes the prompt as its *value* rather than acting as a boolean
 switch, writing the flags in the order `agy -p --output-format json "…"` makes `-p` swallow
@@ -89,11 +102,11 @@ switch, writing the flags in the order `agy -p --output-format json "…"` makes
 the string `--output-format` means. The prompt value must be bound directly to the flag, and other flags
 must come before it: `agy --output-format json -p "<prompt>"`.
 
-**Consequence:** an Antigravity-driven stage would have to pass the full prompt through argv, bounded by this
-machine's `ARG_MAX` of 1,048,576 bytes. A plan file plus a full `git diff` can plausibly approach that ceiling
-on a large run. Writing the prompt to a temp file and passing only its path in the prompt text is an obvious
-workaround, but it relies on the agent choosing to read that file, which was **not probed and is not
-confirmed** here.
+**Consequence:** because the stdin path exists, an Antigravity-driven stage can be fed large prompts the same
+way `src/lib/cli/process.ts` already feeds Claude Code and OpenCode, with no `ARG_MAX` ceiling to design
+around. The argv form remains available and is bounded by this machine's `ARG_MAX` of 1,048,576 bytes —
+comfortably above the 25 KB prompt used in the §10 cross-review, but not a limit to rely on for a plan plus a
+large `git diff`.
 
 ---
 
@@ -139,10 +152,32 @@ types, but **the full item-type vocabulary was not enumerated in this research.*
 ```
 
 The `init` event carries the resolved `cwd` and the full tool list the session was given. The terminal
-`result` event carries the agent's complete response text — Antigravity does **not** stream assistant text
-token-by-token or part-by-part in this mode; `step_update` events report step state transitions only. A UI
-forwarding these events would show step progress during the run but would receive the answer itself only at
-the end.
+`result` event carries the agent's complete response text.
+
+**Assistant text does stream**, via a `text_delta` field on `step_update` events whose `step_type` is
+`agent_response`. This is not visible in a trivial one-word run — the first probe above showed only `init`,
+`step_update`, `result` because the entire answer fitted in a single delta.
+
+> **Correction.** An earlier revision claimed Antigravity does not stream assistant text at all and that
+> `step_update` reports state transitions only. Antigravity's own review (§10) disputed this; a re-probe
+> confirmed the dispute.
+
+Re-probe with a 40-line answer (`Count from 1 to 40, one number per line`) produced 7 events:
+`init`, 5 × `step_update` (`step_type` breakdown: `user_input` 1, `unknown` 1, `agent_response` 2,
+`checkpoint` 1), and `result`. The `agent_response` events carried the text:
+
+```json
+{"event":"step_update","step_update":{"step_index":2,"state":"ACTIVE","step_type":"agent_response",
+ "text_delta":"1\n2\n3\n4\n5\n…"}}
+{"event":"step_update","step_update":{"step_index":2,"state":"DONE","step_type":"agent_response",
+ "text_delta":"\n","duration_seconds":2.004603,"usage":{…}}}
+```
+
+A consumer must accumulate `text_delta` across `agent_response` events. Note the **chunking is coarse**: a
+40-line answer arrived in two deltas, the first containing nearly all of it. So this is a genuine incremental
+channel, but token-level granularity should not be assumed — a UI forwarding these would update in a few
+jumps, not smoothly. The terminal `step_update` for a step also carries its own `duration_seconds` and
+`usage`, i.e. per-step accounting is available, not just the per-run totals in `result`.
 
 ---
 
@@ -160,8 +195,9 @@ model list rather than a provider/model addressing scheme.
 > `--local-provider <OSS_PROVIDER>    Specify which local provider to use (lmstudio or ollama). If not specified with --oss, will use config default or show selection`
 
 A default model can also be set in `~/.codex/config.toml` (`model = "…"`), or overridden per-invocation with
-`-c model="…"`. **No free-tier hosted model is advertised by the CLI's own help output**; the free route Codex
-documents is local inference via `--oss`.
+`-c model="…"`. **No free-tier hosted model is advertised by the CLI's own help output.** `--oss` selects
+local inference, which removes the per-token vendor charge but is not described as "free" anywhere in the
+help text — **whether any Codex route is actually free is not established by this research.**
 
 *Antigravity* — `agy --help`:
 > `--model    Model for the current CLI session`
@@ -213,9 +249,20 @@ working directory by setting the child process's cwd, not by a flag.
 paths. When `agy --mode plan` was run inside the untrusted probe repository and asked to create a file, the
 plan it produced targeted `~/.gemini/antigravity-cli/scratch/` rather than the probe repo (see Q6). Passing
 `--add-dir <probe repo>` did not resolve this — that run failed on the permission wall described in Q7
-instead. **Whether `--add-dir` alone is sufficient to make an arbitrary new directory writable without a
-prior `trustedWorkspaces` entry is therefore NOT confirmed by this research**, and it is the single most
-important open question for using Antigravity against per-run ephemeral worktrees.
+instead.
+
+Asked directly in the §10 cross-review whether `--add-dir` alone grants write access to a directory absent
+from `trustedWorkspaces`, Antigravity answered **"No — `--add-dir` expands session workspace scope but does
+not bypass `trustedWorkspaces` security policy enforcement."** That is a self-report from the model, not
+vendor documentation, so it is not authoritative on its own; it is recorded here because it is **consistent
+with the independent observation above**, where an untrusted directory caused writes to be redirected to
+`~/.gemini/antigravity-cli/scratch/`. Treat as strongly indicated, not proven.
+
+**Consequence for this project:** per-run worktree paths (`<project>/.orchestrator-worktrees/run-<id>/`,
+per ticket 09) are freshly created and would never appear in `trustedWorkspaces`. Any Antigravity-driven
+stage would need that file maintained at runtime, or would have to accept writes being redirected away from
+the worktree. This is the sharpest structural mismatch between Antigravity and this project's design — and
+unlike the `ARG_MAX` concern in Q2, it survived re-probing.
 
 ---
 
@@ -228,12 +275,27 @@ today that guarantee comes from Claude Code's `--permission-mode plan` and its `
 **Answer:** **Yes for both, by different mechanisms, and both were verified to actually block a write.** Codex
 enforces it with an OS-level sandbox; Antigravity enforces it with an agent execution mode.
 
+Scope caveat: the probes below establish that a *model-initiated shell write* is blocked, which is exactly
+what `-s`'s own help text claims to govern ("model-generated shell commands"). They do **not** establish that
+nothing whatsoever in the process can write — configured hooks and MCP-provided tools were not exercised, so
+"read-only" here means the sandbox scope, not a whole-process guarantee.
+
 **Detail / citations:**
 
 *Codex* — `codex exec --help`:
 > `-s, --sandbox <SANDBOX_MODE>    Select the sandbox policy to use when executing model-generated shell commands`
 > `[possible values: read-only, workspace-write, danger-full-access]`
-> `-a, --ask-for-approval <APPROVAL_POLICY>` with values `untrusted`, `on-request`, `never`
+
+**Flag-placement trap:** the related `-a/--ask-for-approval <APPROVAL_POLICY>` (values `untrusted`,
+`on-request`, `never`) is listed **only in top-level `codex --help`, not in `codex exec --help`**, and it is
+not accepted after the subcommand. Verified:
+
+```
+$ codex exec -a never --help
+error: unexpected argument '-a' found     # exit 2
+```
+
+It must precede the subcommand — `codex -a never exec …`. `--approve-for-me` *is* accepted by `exec`.
 
 Verification probe — Codex was explicitly instructed to create a file while under `-s read-only`:
 ```
@@ -282,8 +344,15 @@ direction. Antigravity has an exit-code trap that must not be missed.
 lists:
 > `apply    Apply the latest diff produced by Codex agent as a `git apply` to your local working tree [aliases: a]`
 
-That applies Codex's own produced diff to the tree; it is not a reporting surface. All probe runs exited `0`;
-**non-zero exit behaviour was not probed and is not documented here.**
+That wording is easy to misread. `codex apply --help` shows the usage is `codex apply [OPTIONS] <TASK_ID>` —
+it requires a task identifier, so it is **not** a way to apply the diff from the `codex exec` run you just
+spawned locally. It is a reporting surface for neither purpose.
+
+Exit codes: all probe runs of `codex exec` exited `0`. Argument errors exit `2` (observed above with
+`-a never`). **Non-zero exit behaviour for a failed agent turn was not probed.** Codex's own review of this
+document (see §10) reports that the JSONL stream can also carry `turn.failed` and `error` events, and that
+`codex exec` has **no timeout flag** so a caller must impose its own — both plausible and consistent with the
+help output, but **neither was reproduced here.**
 
 *Antigravity* — **a failed run can exit `0` with `status: "SUCCESS"` and an empty response.** This was
 observed directly. When Antigravity was asked a question requiring a tool it had no allow-rule for, the run
@@ -385,14 +454,101 @@ change behaviour without any flag, which is worth being aware of when reproducin
 
 ---
 
+## 10. Cross-review: each CLI reviewing this document's claims about itself
+
+After the first revision of this document was written, both CLIs were asked to review it — each judging only
+the claims made about *itself*, and asked for factual errors, overclaims, and omissions. This served two
+purposes: closing open questions, and producing a worked example of what driving two different agent CLIs
+from one orchestrator actually looks like. **Every disputed claim was then re-probed independently. Neither
+reviewer was taken at its word, and both turned out to be partly right and partly not.**
+
+### Codex
+
+Invocation: prompt piped on stdin to `codex exec --json -s read-only -C <repo>`. Worked on the first attempt
+with no permission or trust configuration.
+
+It found **two real factual errors**, both confirmed by re-running the CLI:
+
+| Claim | Verification | Outcome |
+|---|---|---|
+| Q6 attributed `-a/--ask-for-approval` to `codex exec --help` | `codex exec -a never` → `error: unexpected argument '-a' found`, exit 2 | **Doc was wrong** — flag is top-level only |
+| Q7 implied `codex apply` applies the local `exec` run's diff | `codex apply --help` → `Usage: codex apply [OPTIONS] <TASK_ID>` | **Doc was misleading** — it takes a task id |
+
+It also flagged two overclaims that were accepted and softened (Q4's "free route" framing for `--oss`; Q6's
+"genuinely read-only" wording, which the probe only establishes for model-generated shell commands), and
+reported two omissions not reproduced here (`turn.failed`/`error` events in the JSONL stream; no timeout flag
+on `codex exec`, so a caller must impose its own).
+
+On the open question about review subcommands, it reported that `codex exec review` is the better fit for a
+review stage — it accepts `--base`/`--commit`/`--uncommitted` target selectors and supports `--json`, `-o`
+and `--output-schema`, whereas `codex review` emits human-formatted findings only. It added that
+`exec review --json` produces ordinary JSONL lifecycle events rather than a single findings object, so a
+schema must be imposed if structured findings are wanted. **Not independently verified.**
+
+Cost of that single review: `input_tokens` 1,471,246 (`cached_input_tokens` 1,296,640), `output_tokens`
+10,926, `reasoning_output_tokens` 8,741 — it explored the repository and loaded its own documentation skill
+rather than reading only the file it was pointed at.
+
+### Antigravity
+
+Invocation took **three attempts**:
+
+1. Prompt via `-p` in argv, whole document inline (23,609 bytes) — returned exit `0`, `status: "SUCCESS"`,
+   `response: ""`, 41,403 tokens consumed. Silent failure, per Q7.
+2. Identical retry — same silent failure.
+3. `--mode plan --dangerously-skip-permissions` — succeeded, 14.4 s, 50,825 tokens.
+
+Attempts 1–2 are the strongest evidence in this document for the Q7 trap, and they sharpen it: **the prompt
+needed no tools at all** (the document was already inline in argv), yet Antigravity still reached for a
+`command`-permission tool, had it auto-denied, and reported success with an empty response. The failure mode
+is not limited to prompts that obviously require tool use.
+
+Attempt 3 ran with `--mode plan` as a guard; `git status` was captured before and after and was byte-identical,
+independently re-confirming Q6's finding that plan mode does not write into the workspace even with all tool
+permissions bypassed.
+
+Its review **disputed two claims, and re-probing upheld both disputes**:
+
+| Disputed claim | Re-probe | Outcome |
+|---|---|---|
+| Q2: "ignores stdin entirely", therefore `ARG_MAX`-bound | `printf '…' \| agy --output-format json` → `SUCCESS`, response `STDIN_A2_OK` | **Doc was wrong** — stdin works when `--print` is omitted |
+| Q3: "does not stream assistant text" | 40-line answer → `step_update`/`agent_response` events carrying `text_delta` | **Doc was wrong** — a delta channel exists |
+
+Both errors had the same root cause: the original probes explored the flag space too narrowly (every stdin
+attempt went *through* `-p`; the streaming check used a one-word answer). It also raised one omission worth
+recording — Antigravity persists per-run plans and logs under
+`~/.gemini/antigravity-cli/brain/<conversation_id>/`, which accumulates and is not cleaned up when a
+temporary worktree is discarded.
+
+Its answer to the `--add-dir` question is recorded in Q5, with the caveat that it is a self-report.
+
+### What this says about driving both from one orchestrator
+
+- **Codex is the lower-friction of the two to spawn.** It ran correctly with no per-directory setup, no
+  permission configuration, and an explicit `-C` for the target directory.
+- **Antigravity needs configuration before it can be spawned unattended at all**, and its failure mode when
+  that configuration is missing is silent success rather than an error — the single most dangerous property
+  found in this research for an orchestrator that records stage outcomes automatically.
+- **A CLI reviewing documentation about itself is useful but not authoritative.** Between them the two
+  reviewers surfaced four genuine defects in this document that its author had missed; they also produced
+  self-reports that could not be verified, and confident claims that re-probing had to settle. The workflow
+  that produced value was *reviewer proposes, probe disposes* — not accepting either agent's word.
+
+---
+
 ## Sources consulted
 
 Primary — the installed binaries themselves:
 - `codex --version`, `codex --help`, `codex exec --help` (codex-cli 0.147.0)
 - `agy --version`, `agy --help`, `agy models` (1.1.11)
-- Recorded probe runs of `codex exec --json` (argv prompt, stdin prompt, read-only write attempt)
-- Recorded probe runs of `agy` (`--output-format json` and `stream-json`; argv/stdin/empty prompt variants;
-  `--mode plan` write attempt; `--add-dir` permission-wall run)
+- Recorded probe runs of `codex exec --json` (argv prompt, stdin prompt, read-only write attempt),
+  plus `codex exec -a never` and `codex apply --help` to settle the §10 corrections
+- Recorded probe runs of `agy` (`--output-format json` and `stream-json`; six prompt-input variants covering
+  argv, piped stdin with and without `--print`, `-p -`, and `-p ""`; a 40-line generation to test
+  `text_delta` streaming; `--mode plan` write attempt; `--add-dir` permission-wall run)
+- The §10 cross-review runs themselves: `codex exec --json -s read-only -C <repo>` fed this document on
+  stdin, and `agy --mode plan --dangerously-skip-permissions` fed it in argv (after two silent-failure
+  attempts without the permission bypass)
 - Config/state files on the test machine: `~/.codex/config.toml`, `~/.codex/auth.json` (structure only),
   `~/.gemini/antigravity-cli/settings.json`, `~/.gemini/antigravity-cli/brain/<conversation_id>/`
 

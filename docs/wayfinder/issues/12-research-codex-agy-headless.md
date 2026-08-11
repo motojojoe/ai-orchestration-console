@@ -34,25 +34,28 @@ Summary:
 1. **Headless invocation**: Codex uses a subcommand, `codex exec [PROMPT]` (alias `codex e`). Antigravity uses
    `agy --print "<prompt>"` / `-p`. Codex also has dedicated `codex review` and `codex exec review`
    subcommands — unprobed, but directly suggestive for a Review stage.
-2. **Input**: **Codex accepts stdin; Antigravity does not.** Codex takes the prompt positionally, as `-`, or
-   piped, appending piped stdin to an argv prompt as a `<stdin>` block. Antigravity takes the prompt *only* as
-   the value of `--print`, ignores stdin, and errors on an empty value — so its prompts are bounded by
-   `ARG_MAX` (1,048,576 bytes here). That conflicts with `src/lib/cli/process.ts`, which feeds prompts over
-   stdin specifically to avoid `ARG_MAX`. Related footgun: `--print` takes the prompt as its *value*, so
-   `agy -p --output-format json "…"` silently uses `--output-format` as the prompt.
+2. **Input**: **both accept the prompt on stdin.** Codex takes it positionally, as `-`, or piped, appending
+   piped stdin to an argv prompt as a `<stdin>` block. Antigravity's stdin path works only when `--print` is
+   omitted *entirely* (`… | agy --output-format json`); passing `-p -` uses the literal `-` as the prompt and
+   `-p ""` is a hard error. Either CLI can therefore be fed large prompts the way `src/lib/cli/process.ts`
+   already does, with no `ARG_MAX` ceiling to design around. Related footgun: `--print` takes the prompt as
+   its *value*, so `agy -p --output-format json "…"` silently uses `--output-format` as the prompt.
 3. **Output**: both stream NDJSON, but with **different envelopes and neither matching Claude Code's**. Codex
    keys on `type` (`thread.started` → `turn.started` → `item.completed` → `turn.completed`), with the final
    text in an `item.completed` whose `item.type` is `agent_message`. Antigravity keys on `event`
-   (`init` → `step_update` → `result`). Antigravity does **not** stream assistant text incrementally — step
-   states stream, but the response text arrives only in the terminal `result` event.
+   (`init` → `step_update` → `result`), and streams assistant text via a `text_delta` field on `step_update`
+   events whose `step_type` is `agent_response` — a consumer must accumulate those. Chunking is coarse: a
+   40-line answer arrived in two deltas, so token-level granularity should not be assumed.
 4. **Model selection**: Codex `-m/--model`, plus `--oss` + `--local-provider {lmstudio|ollama}` for local
    models (its only free route). Antigravity `--model` plus an `--effort {low|medium|high}` dial, over a fixed
    list from `agy models` (Gemini 3.x, Claude Sonnet/Opus 4.6, GPT-OSS 120B); whether any is free is not
    confirmed.
 5. **Working directory**: Codex has `-C/--cd`. **Antigravity has no directory flag** — it uses the process
-   cwd, and additionally gates on a `trustedWorkspaces` list in its settings file. Whether `--add-dir` alone
-   can make an arbitrary new path writable is **unresolved**, and is the key open question for pointing
-   Antigravity at per-run ephemeral worktrees.
+   cwd, and additionally gates on a `trustedWorkspaces` list in its settings file. `--add-dir` does **not**
+   bypass that gate (Antigravity's own answer, consistent with the observed redirect of writes to its scratch
+   directory). Per-run worktree paths are freshly created and never in `trustedWorkspaces`, so an
+   Antigravity-driven stage would need that file maintained at runtime — the sharpest structural mismatch
+   found with this project's design.
 6. **Read-only enforcement**: **both verified to genuinely block a write**, by different mechanisms. Codex
    `-s read-only` is an OS-level sandbox — instructed to create a file, the agent tried and reported "the
    workspace is mounted read-only, and write approval is disabled". Antigravity `--mode plan` also wrote
@@ -75,12 +78,21 @@ Summary:
    `trustedWorkspaces`) and it has no `doctor` equivalent; its token storage was deliberately not
    investigated.
 
-Two open gaps this research did not resolve, both about Antigravity: whether `--add-dir` can grant an
-untrusted directory without a prior `trustedWorkspaces` entry (5), and whether any of its models is free (4).
-Codex's `review` subcommands were also left unprobed (1).
+10. **Cross-review (§10)**: each CLI was then asked to review this document's claims about itself, and every
+    disputed claim was re-probed rather than accepted. That round corrected four defects in the first
+    revision — two Codex claims (`-a/--ask-for-approval` is top-level only, not an `exec` flag; `codex apply`
+    takes a `<TASK_ID>` and is not a way to apply the local run's diff) and two Antigravity claims (it *does*
+    read stdin; it *does* stream text via `text_delta`). Codex ran first-try with no setup. Antigravity took
+    three attempts, the first two being silent failures that consumed 41k tokens and returned success with an
+    empty response — with a prompt that needed no tools at all.
+
+Remaining open: whether any Antigravity model is free (4), and the shape of `codex exec review`'s output,
+which Codex described but which was not independently verified (1).
 
 Net read: **Codex fits the existing pipeline machinery with no changes to how prompts are passed** — stdin,
-an enforced read-only sandbox, and a JSONL stream are all already what the console expects. **Antigravity does
-not fit as cleanly**: argv-only prompts collide with the deliberate stdin design, the missing directory flag
-plus workspace-trust gate collide with ephemeral worktrees, and its silent-success failure mode needs explicit
-handling. None of that is a recommendation to adopt either — SPEC.md §13 still holds.
+an enforced read-only sandbox, a JSONL stream and `-C` are all already what the console expects, and it
+required no per-directory setup. **Antigravity is a closer fit than the first revision concluded** — the
+`ARG_MAX` objection was wrong and it does stream text — but two real obstacles survived re-probing: the
+`trustedWorkspaces` gate versus per-run ephemeral worktrees, and a silent-success failure mode that an
+orchestrator recording stage outcomes automatically would mis-record as a pass. None of this is a
+recommendation to adopt either — SPEC.md §13 still holds.
