@@ -62,6 +62,25 @@ error rather than a warning. This is load-bearing: npm 11 writes `libc` fields i
 60-line lockfile diff that looks like a dependency change but is not. If you need to move to a newer
 Node, change all four in the same commit and regenerate the lockfile deliberately.
 
+### Why `overrides` exists in package.json
+
+Every entry is there to patch a **transitive** dependency of `next` that carries a high-severity
+advisory. None of them is a preference. They exist because the alternative npm offers is
+`npm audit fix --force`, which upgrades to `next@16`, a breaking change — the overrides are how this
+repo stays on Next 15 while still getting the patched sub-dependencies.
+
+| Override | What `next@15.5.22` asks for | Why it's overridden |
+|---|---|---|
+| `postcss ^8.5.25` | `8.4.31` (exact pin) | Four advisories in `postcss <=8.5.22`: XSS via unescaped `</style>` in stringify output (GHSA-qx2v-qp2m-jg93), and three `sourceMappingURL` path-traversal / arbitrary `.map` file reads (GHSA-6g55-p6wh-862q, GHSA-r28c-9q8g-f849, GHSA-fxqj-rqcc-2cmp) |
+| `sharp ^0.35.0` | `^0.34.3` | `sharp <0.35.0` inherits libvips CVE-2026-33327, -33328, -35590, -35591 (GHSA-f88m-g3jw-g9cj). The fix only landed in 0.35.0, so this override deliberately resolves **outside** the range `next` declares — that is required, not an oversight |
+| `nanoid ^3.3.17` | via `postcss`, which asks `^3.3.16` | `nanoid <3.3.17` can loop forever when a custom generator is called with size 0 (GHSA-2v37-7h3g-55p8). Unlike the two above, this one resolves *inside* the range `postcss` already declares, so it is a low-risk nudge. Practical exposure here was already nil — `postcss` calls `nanoid(6)` from `nanoid/non-secure` for CSS debug ids, never a custom generator — but leaving it unfixed keeps `npm audit` noisy, which is how real findings get missed |
+
+**These are not permanent.** Once `next` ships a release that depends on patched versions itself, each
+override becomes dead weight that silently holds a dependency back. To check whether one is still
+earning its place: copy `package.json` to a scratch directory, delete the `overrides` block, run
+`npm install && npm audit` there, and see what comes back. Do that in a throwaway directory — not in
+this repo, where it would rewrite the lockfile.
+
 Config via environment variables:
 - `ORCHESTRATOR_DB_PATH` — SQLite file location, defaults to `~/.orchestrator/history.db`.
 - `ORCHESTRATOR_OPENCODE_MODEL` — Execute stage's model, defaults to
