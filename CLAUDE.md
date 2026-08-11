@@ -17,6 +17,31 @@ This repo follows **gitflow** — never commit directly to `main`. Do work on a 
 `fix/*`) branch off `develop` and merge back through a PR; `main` only receives merges from
 `develop` or release/hotfix branches.
 
+### Running more than one agent at a time
+
+**Give each concurrent agent its own git worktree.** A clone has one `HEAD` and one working tree, so
+two agents sharing this directory will silently fight over both:
+
+```bash
+git worktree add ../aoc-<task> -b <branch> develop   # start
+git worktree remove ../aoc-<task>                    # when the branch is merged or abandoned
+```
+
+This is not hypothetical. On 2026-08-11 two sessions worked here at once: one committed a toolchain
+change on `chore/pin-toolchain`, the other branched `feature/cli` from it and left `HEAD` there. The
+first session was a `git push` away from opening a PR that silently contained the other session's
+unreviewed commit, because pushing the current `HEAD` no longer meant pushing its own branch.
+
+Two habits make the failure survivable even without worktrees, and are worth keeping regardless:
+
+- **Push and PR by explicit branch name**, never by implicit `HEAD` — `git push origin <branch>` and
+  `gh pr create --head <branch>`. Then a moved `HEAD` cannot smuggle commits into your PR.
+- **Check `git log --oneline <base>..<branch>` before opening a PR** and confirm every commit listed
+  is one you meant to ship.
+
+Avoid `git checkout` in a shared clone while another agent is working — it rewrites files on disk
+underneath them. Prefer a worktree, or wait.
+
 ## Commands
 
 ```bash
