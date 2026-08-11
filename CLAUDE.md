@@ -30,6 +30,13 @@ npm run typecheck  # tsc --noEmit — run this after any change, no test suite e
 No automated test suite exists in this repo. Verification so far has been manual: run the dev
 server, start a real pipeline run against a throwaway git repo, and check the result.
 
+**Toolchain is pinned to Node 22 / npm 10.** `.nvmrc`, the `engines` range and `packageManager` in
+`package.json`, and `engine-strict=true` in `.npmrc` all agree, and `.npmrc` makes the range a hard
+error rather than a warning. This is load-bearing: npm 11 writes `libc` fields into
+`package-lock.json` that npm 10 strips back out, so installing under a mismatched npm produces a
+60-line lockfile diff that looks like a dependency change but is not. If you need to move to a newer
+Node, change all four in the same commit and regenerate the lockfile deliberately.
+
 Config via environment variables:
 - `ORCHESTRATOR_DB_PATH` — SQLite file location, defaults to `~/.orchestrator/history.db`.
 - `ORCHESTRATOR_OPENCODE_MODEL` — Execute stage's model, defaults to
