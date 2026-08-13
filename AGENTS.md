@@ -58,7 +58,9 @@ Never commit a resolved machine-local absolute path or generated local identifie
 repo-relative path, derive it at runtime, document an environment variable, or use an explicit
 placeholder instead. Portable home-relative paths such as `~/.orchestrator/history.db` and clearly
 marked placeholders are allowed; the prohibition is against real personal paths and generated
-values that silently mislead another clone, worktree, or CI environment. Secretlint does not catch
+values that silently mislead another clone, worktree, or CI environment — and that carry the
+author's account name into history, where a rewrite is the only way to get it back out. Secretlint
+does not catch
 this class of mistake, so inspect the staged diff before committing:
 
 ```bash
