@@ -308,7 +308,7 @@ would show up as an untracked file on the first build. This is an implementation
 existing fact.
 
 **`engines`.** `package.json` declares `"node": ">=22 <23"`, but `db.ts` imports `node:sqlite`
-unconditionally and that module landed in 22.5.0. The floor should be `>=22.5`. Per CLAUDE.md the
+unconditionally and that module landed in 22.5.0. The floor should be `>=22.5`. Per AGENTS.md the
 toolchain pins are load-bearing and change deliberately — this goes in its own commit, and does not
 touch the npm pin or the lockfile.
 
