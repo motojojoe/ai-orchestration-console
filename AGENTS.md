@@ -12,11 +12,83 @@ this machine: **Plan** (Claude Code, headless) → **Execute** (OpenCode, free m
 `SPEC.md` before changing pipeline behavior; it documents *why* things work the way they do, not
 just what the code does.
 
+## PMB workspace routing
+
+Console implementation memory belongs to this repository's PMB workspace even when the console
+orchestrates another repository. The target path is runtime input; it does not make console design,
+defects, tests, or releases part of the target repository's memory.
+
+Before any other PMB call, use `mcp__pmb__workspace_info` through the same MCP connection that would
+read or write memory. Require `name=ai-orchestration-console` and require `root` to equal the
+canonical main-worktree root: the parent directory of the absolute common Git directory returned by
+`git rev-parse --path-format=absolute --git-common-dir`. A linked worktree must resolve to that same
+canonical identity, not to its own checkout path. The reported `id` is machine-local: require it to
+remain stable within the session, but do not hardcode it in tracked files. Only after this gate
+passes may the session call `prepare`, `recall`, or a PMB write tool. `pmb workspace current` starts
+a separate CLI process, so it is useful for resolver diagnostics but never proves the attachment of
+an already-running MCP engine. Conversely, before any mutating standalone PMB CLI command, run
+`pmb workspace current` from that command's exact working directory and require the intended
+name/root; an MCP `workspace_info` result does not attest a separate CLI process.
+
+On a mismatch, error, or unavailable `workspace_info`, make no further PMB calls and do not begin
+PMB-dependent substantive work. Immediately tell the user the expected and actual identity (or
+that the actual identity is unavailable), the blocked action, and that no PMB write was attempted.
+Recover by restarting or reconnecting a session rooted or configured for this repository, exposing
+`workspace_info`, and repeating the gate before `prepare`. A shell tool's working directory, an
+event's `project` field, and a recall filter do not retarget a running MCP server. Do not use the
+persisted global `pmb workspace use` switch while concurrent agents may be active.
+
+If one run produces both console and target-repository knowledge, split it into atomic records:
+console implementation context stays here; target code, domain, and task decisions go to the
+target repository's independently verified PMB connection.
+
+This section now lives in the canonical `AGENTS.md`, so it governs every agent that reads that file
+— Claude Code through the `CLAUDE.md` stub, and Codex and other `AGENTS.md`-aware tools directly.
+What it does not do is *enforce* anything: nothing in this repository verifies that an agent ran the
+`workspace_info` gate before writing. Reading the rule is the only mechanism, so do not claim a
+given tool is fail-closed on the strength of this document alone.
+
 ## Git workflow
 
 This repo follows **gitflow** — never commit directly to `main`. Do work on a `feature/*` (or
 `fix/*`) branch off `develop` and merge back through a PR; `main` only receives merges from
 `develop` or release/hotfix branches.
+
+Never commit a resolved machine-local absolute path or generated local identifier. Use a
+repo-relative path, derive it at runtime, document an environment variable, or use an explicit
+placeholder instead. Portable home-relative paths such as `~/.orchestrator/history.db` and clearly
+marked placeholders are allowed; the prohibition is against real personal paths and generated
+values that silently mislead another clone, worktree, or CI environment. Secretlint does not catch
+this class of mistake, so inspect the staged diff before committing:
+
+```bash
+git diff --cached | grep -nE '/Users/|/home/|/private/tmp/'
+```
+
+### Running more than one agent at a time
+
+**Give each concurrent agent its own git worktree.** A clone has one `HEAD` and one working tree, so
+two agents sharing this directory will silently fight over both:
+
+```bash
+git worktree add ../aoc-<task> -b <branch> develop   # start
+git worktree remove ../aoc-<task>                    # when the branch is merged or abandoned
+```
+
+This is not hypothetical. On 2026-08-11 two sessions worked here at once: one committed a toolchain
+change on `chore/pin-toolchain`, the other branched `feature/cli` from it and left `HEAD` there. The
+first session was a `git push` away from opening a PR that silently contained the other session's
+unreviewed commit, because pushing the current `HEAD` no longer meant pushing its own branch.
+
+Two habits make the failure survivable even without worktrees, and are worth keeping regardless:
+
+- **Push and PR by explicit branch name**, never by implicit `HEAD` — `git push origin <branch>` and
+  `gh pr create --head <branch>`. Then a moved `HEAD` cannot smuggle commits into your PR.
+- **Check `git log --oneline <base>..<branch>` before opening a PR** and confirm every commit listed
+  is one you meant to ship.
+
+Avoid `git checkout` in a shared clone while another agent is working — it rewrites files on disk
+underneath them. Prefer a worktree, or wait.
 
 ## Commands
 
@@ -37,6 +109,25 @@ error rather than a warning. This is load-bearing: npm 11 writes `libc` fields i
 `package-lock.json` that npm 10 strips back out, so installing under a mismatched npm produces a
 60-line lockfile diff that looks like a dependency change but is not. If you need to move to a newer
 Node, change all four in the same commit and regenerate the lockfile deliberately.
+
+### Why `overrides` exists in package.json
+
+Every entry is there to patch a **transitive** dependency of `next` that carries a high-severity
+advisory. None of them is a preference. They exist because the alternative npm offers is
+`npm audit fix --force`, which upgrades to `next@16`, a breaking change — the overrides are how this
+repo stays on Next 15 while still getting the patched sub-dependencies.
+
+| Override | What `next@15.5.22` asks for | Why it's overridden |
+|---|---|---|
+| `postcss ^8.5.25` | `8.4.31` (exact pin) | Four advisories in `postcss <=8.5.22`: XSS via unescaped `</style>` in stringify output (GHSA-qx2v-qp2m-jg93), and three `sourceMappingURL` path-traversal / arbitrary `.map` file reads (GHSA-6g55-p6wh-862q, GHSA-r28c-9q8g-f849, GHSA-fxqj-rqcc-2cmp) |
+| `sharp ^0.35.0` | `^0.34.3` | `sharp <0.35.0` inherits libvips CVE-2026-33327, -33328, -35590, -35591 (GHSA-f88m-g3jw-g9cj). The fix only landed in 0.35.0, so this override deliberately resolves **outside** the range `next` declares — that is required, not an oversight |
+| `nanoid ^3.3.17` | via `postcss`, which asks `^3.3.16` | `nanoid <3.3.17` can loop forever when a custom generator is called with size 0 (GHSA-2v37-7h3g-55p8). Unlike the two above, this one resolves *inside* the range `postcss` already declares, so it is a low-risk nudge. Practical exposure here was already nil — `postcss` calls `nanoid(6)` from `nanoid/non-secure` for CSS debug ids, never a custom generator — but leaving it unfixed keeps `npm audit` noisy, which is how real findings get missed |
+
+**These are not permanent.** Once `next` ships a release that depends on patched versions itself, each
+override becomes dead weight that silently holds a dependency back. To check whether one is still
+earning its place: copy `package.json` to a scratch directory, delete the `overrides` block, run
+`npm install && npm audit` there, and see what comes back. Do that in a throwaway directory — not in
+this repo, where it would rewrite the lockfile.
 
 Config via environment variables:
 - `ORCHESTRATOR_DB_PATH` — SQLite file location, defaults to `~/.orchestrator/history.db`.
