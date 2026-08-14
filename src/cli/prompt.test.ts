@@ -52,52 +52,69 @@ test("no editor configured is null — never guess vi", () => {
 
 test("a saved edit is returned and the temp file is cleaned up", async () => {
   let seen = "";
-  const result = await editText("original plan", async (_program, args) => {
-    seen = args[args.length - 1]!;
-    assert.equal(readFileSync(seen, "utf-8"), "original plan");
-    writeFileSync(seen, "edited plan");
-    return 0;
-  });
+  const result = await editText(
+    "original plan",
+    async (_program, args) => {
+      seen = args[args.length - 1]!;
+      assert.equal(readFileSync(seen, "utf-8"), "original plan");
+      writeFileSync(seen, "edited plan");
+      return 0;
+    },
+    { EDITOR: "stub-editor" },
+  );
   assert.deepEqual(result, { ok: true, text: "edited plan" });
   assert.throws(() => readFileSync(seen, "utf-8"), /ENOENT/);
 });
 
 test("a non-zero editor exit keeps the original", async () => {
-  const result = await editText("original plan", async (_p, args) => {
-    writeFileSync(args[args.length - 1]!, "half-written");
-    return 1;
-  });
+  const result = await editText(
+    "original plan",
+    async (_p, args) => {
+      writeFileSync(args[args.length - 1]!, "half-written");
+      return 1;
+    },
+    { EDITOR: "stub-editor" },
+  );
   assert.equal(result.ok, false);
   assert.match((result as { reason: string }).reason, /exited with 1/);
 });
 
 test("an editor that cannot spawn is reported, not thrown", async () => {
-  const result = await editText("original plan", async () => {
-    throw new Error("spawn ENOENT");
-  });
+  const result = await editText(
+    "original plan",
+    async () => {
+      throw new Error("spawn ENOENT");
+    },
+    { EDITOR: "stub-editor" },
+  );
   assert.equal(result.ok, false);
   assert.match((result as { reason: string }).reason, /spawn ENOENT/);
 });
 
 test("an emptied file is refused, matching the web console's fallback", async () => {
-  const result = await editText("original plan", async (_p, args) => {
-    writeFileSync(args[args.length - 1]!, "   \n  ");
-    return 0;
-  });
+  const result = await editText(
+    "original plan",
+    async (_p, args) => {
+      writeFileSync(args[args.length - 1]!, "   \n  ");
+      return 0;
+    },
+    { EDITOR: "stub-editor" },
+  );
   assert.equal(result.ok, false);
   assert.match((result as { reason: string }).reason, /empty/i);
 });
 
 test("with no editor configured, editText refuses before spawning anything", async () => {
-  const saved = { VISUAL: process.env.VISUAL, EDITOR: process.env.EDITOR };
-  delete process.env.VISUAL;
-  delete process.env.EDITOR;
-  try {
-    const result = await editText("original plan");
-    assert.equal(result.ok, false);
-    assert.match((result as { reason: string }).reason, /\$EDITOR/);
-  } finally {
-    if (saved.VISUAL !== undefined) process.env.VISUAL = saved.VISUAL;
-    if (saved.EDITOR !== undefined) process.env.EDITOR = saved.EDITOR;
-  }
+  let spawned = false;
+  const result = await editText(
+    "original plan",
+    async () => {
+      spawned = true;
+      return 0;
+    },
+    {},
+  );
+  assert.equal(result.ok, false);
+  assert.match((result as { reason: string }).reason, /\$EDITOR/);
+  assert.equal(spawned, false, "must refuse before spawning anything");
 });

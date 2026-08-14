@@ -117,9 +117,9 @@ export async function ask(
  * would otherwise reject `process.env` for sharing no *declared* property name with it — VISUAL
  * and EDITOR reach `process.env` only through its own index signature, not as named properties.
  */
-export function resolveEditor(
-  env: { VISUAL?: string; EDITOR?: string; [key: string]: string | undefined },
-): { program: string; args: string[] } | null {
+export type EditorEnv = { VISUAL?: string; EDITOR?: string; [key: string]: string | undefined };
+
+export function resolveEditor(env: EditorEnv): { program: string; args: string[] } | null {
   const raw = (env.VISUAL ?? env.EDITOR ?? "").trim();
   if (!raw) return null;
   const [program, ...args] = raw.split(/\s+/);
@@ -137,12 +137,19 @@ const defaultSpawn: EditorSpawn = (program, args) =>
  * Round-trips text through the user's editor. Any failure keeps the original: approveRun commits
  * whatever string it is handed, and the web route falls back to the stored plan when the submitted
  * one is empty, so refusing empty text here is what keeps the two interfaces in agreement.
+ *
+ * `env` is injectable for the same reason `spawnEditor` is. Reading `process.env` directly made
+ * the tests below depend on the ambient shell: run through `npm test` they passed only because
+ * npm injects `EDITOR=vi` from its own `editor` config default, and run directly —
+ * `node --experimental-strip-types --test src/cli/prompt.test.ts` — four of them failed on
+ * "No $VISUAL or $EDITOR is set". A gate that reports green only under one launcher is not a gate.
  */
 export async function editText(
   initial: string,
   spawnEditor: EditorSpawn = defaultSpawn,
+  env: EditorEnv = process.env,
 ): Promise<{ ok: true; text: string } | { ok: false; reason: string }> {
-  const editor = resolveEditor(process.env);
+  const editor = resolveEditor(env);
   if (!editor) {
     return { ok: false, reason: "No $VISUAL or $EDITOR is set — set one and try again." };
   }
