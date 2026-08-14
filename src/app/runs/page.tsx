@@ -22,9 +22,14 @@ export default function RunsHistoryPage() {
     <main style={{ maxWidth: 900, margin: "0 auto", padding: "3rem 1.5rem" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "2rem" }}>
         <h1 style={{ fontSize: "1.5rem", fontWeight: 700 }}>Run history</h1>
-        <Link href="/" className="btn btn-primary">
-          New run
-        </Link>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+          <Link href="/docs" className="btn btn-ghost">
+            Docs
+          </Link>
+          <Link href="/" className="btn btn-primary">
+            New run
+          </Link>
+        </div>
       </div>
 
       {runs.length === 0 ? (
