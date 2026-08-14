@@ -99,11 +99,24 @@ npm install      # also wires up the secretlint pre-commit hook via husky
 npm run dev      # start the app at http://localhost:3000 (hot-reloads on save)
 npm run build    # production build
 npm run start    # run a production build
-npm run typecheck  # tsc --noEmit — run this after any change, no test suite exists yet
+npm run typecheck  # tsc --noEmit — run this after any change
+npm test         # node --test through the type-stripping loader, over an explicit file list
+npm run build:cli  # bundle the orch CLI to bin/orch.js
 ```
 
-No automated test suite exists in this repo. Verification so far has been manual: run the dev
+`npm test` covers the pure CLI modules and the two library files Node can load without Next's
+module resolution. It is not a full suite: nothing in `src/app/`, `src/components/`, or the
+pipeline's stage orchestration is covered, and verification of those is still manual — run the dev
 server, start a real pipeline run against a throwaway git repo, and check the result.
+
+Two things about that command are load-bearing:
+
+- **`node --test src/` does not discover `.ts` tests on Node 22**, so the `test` script carries an
+  explicit file list. A new test file that is not appended to that list never runs, and the suite
+  still reports green.
+- **Run it as `env -u EDITOR -u VISUAL npm test` when you care about the answer.** `npm run` injects
+  `EDITOR=vi` from npm's own config default, which once masked four failing tests that read
+  `process.env` directly. A gate that reports green only under one launcher is not a gate.
 
 **Toolchain is pinned to Node 22 / npm 10.** `.nvmrc`, the `engines` range and `packageManager` in
 `package.json`, and `engine-strict=true` in `.npmrc` all agree, and `.npmrc` makes the range a hard
@@ -219,3 +232,55 @@ cached response even after the real underlying state has already changed.
 
 Desktop notifications (`src/lib/notify.ts`) fire on stage failure/timeout and on run completion,
 gated on `Notification.permission`, requested once on page load.
+
+### The CLI: `src/cli/`
+
+`orch` is a second consumer of `src/lib/**`, not a reimplementation — every status transition still
+goes through `pipeline.ts`, so the two interfaces cannot drift. It runs the pipeline in the
+foreground in one process, which is why it subscribes to `subscribeRunEvents` directly instead of
+over SSE.
+
+Four constraints are load-bearing:
+
+- **Files under `src/cli/` that have unit tests may import only *types* from `src/lib/**`**, plus
+  `node:` builtins at runtime. Tests run through Node's type-stripping loader, which cannot resolve
+  the extensionless specifiers `src/lib/**` uses internally (`from "./process"`) — but `import type`
+  is erased before Node sees it. This is why `exit-codes.ts`, `render.ts` and `prompt.ts` are
+  separate from `commands.ts`, which imports the pipeline at runtime and is verified end-to-end
+  against the built bundle instead.
+- **`src/cli/index.ts` must not carry a shebang**, and must not use top-level `await`. esbuild
+  preserves an input hashbang *ahead of* `--banner:js`, producing a second `#!` on line 2 that Node
+  rejects; and `--format=cjs` rules out bundled top-level await.
+- **Ctrl-C awaits the outstanding pipeline promise before exiting.** `gracefulStop` waits five
+  seconds and sends SIGKILL without awaiting the child's `close` event, so exiting the moment
+  `cancelRun` returns can beat the `cancelled` status write and the worktree removal — stranding
+  exactly the state the cancel was meant to clean up.
+- **`ask` in `prompt.ts` re-raises SIGINT at this process, holding the event loop open with a
+  ref'd timer while it does.** Do not simplify either half. readline's terminal mode clears `ISIG`,
+  so Ctrl-C at a gate arrives as the byte `0x03` and no `process.on("SIGINT")` handler runs on its
+  own; and a registered SIGINT listener is not a ref'd libuv handle, so without that timer Node
+  ends the loop and exits **0** before the re-raised signal is ever polled — a silent success code
+  over a run left parked with a dead `owner_pid` and its worktree on disk. Both halves cost a
+  review round each to establish, under a pty, after confident reasoning that was wrong.
+
+Runs record `owner_pid` so `cancelRun` can tell a run stranded by a dead process (close it out)
+from one a different live process is driving (refuse — `finalizeTerminal` deletes worktrees
+outright, and doing that under someone else's Execute destroys uncommitted work). A run parked at a
+gate **keeps** its `owner_pid` deliberately: `approveRun`/`retryExecute` transfer it to whoever
+resumes the run. So a live `owner_pid` on a parked run does *not* mean someone is sitting at a
+prompt — every run the web console parked carries the dev server's pid — which is why nothing gates
+`resume` or `cancel` on pid liveness. What guards the real hazard is the status check on the
+transition itself: `approveRun`, `rejectRun`, `retryExecute` and `closeRun` each refuse a run whose
+status has moved, so two processes at one gate cannot start two Execute stages on one worktree.
+
+`approveRun` is that check and nothing else; the work lives in module-private `approvePlan`. The
+auto-approve chain in `startRun` calls `approvePlan` directly on purpose. Routing it through
+`approveRun` would mean parking the run at `awaiting_approval` first, and that publishes a gate the
+run does not have: `setStatus` emits over SSE so browser tabs render the approve controls, and the
+status stays there across `writePlanFileAndCommit`'s await, so a click landing in that window
+passes the guard and starts a second plan commit.
+
+Known gaps, both recorded rather than fixed: `SPEC.md:17` says one pipeline at a time and nothing
+enforces it — the CLI's check is advisory and the web route has none. And the retry cap is off by
+one: `retry_count` starts at 0 and `retryExecute` rejects at `>= 3`, allowing four Execute↔Review
+cycles where `SPEC.md:99` says three.
