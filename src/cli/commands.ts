@@ -1,11 +1,11 @@
 import {
   ACTIVE_STATUSES,
   GATE_STATUSES,
+  UNFINISHED_STATUSES,
   findUnfinishedRuns,
   getRun,
   listRuns,
   type Run,
-  type RunStatus,
 } from "../lib/db";
 import { validateProject } from "../lib/git";
 import { isPidAlive } from "../lib/orchestrator/control";
@@ -163,7 +163,16 @@ export async function driveToTerminal(
       process.stdout.write(`\n${planText}\n`);
       const choice = await ask("Approve this plan?", ["a", "e", "r"]);
       if (choice === "r") {
-        await track(rejectRun(runId));
+        try {
+          // A status that moved underneath the CLI (another process already answered this gate,
+          // or the run's worktree is gone) is a user-facing constraint, not a pipeline failure —
+          // same reasoning as the needs_changes branch below. `ask`/`editText` stay outside every
+          // try/catch here: prompt.ts's SIGINT unwinding is do-not-touch.
+          await track(rejectRun(runId));
+        } catch (err) {
+          process.stderr.write(`${(err as Error).message}\n`);
+          return EXIT.USAGE;
+        }
         continue;
       }
       if (choice === "e") {
@@ -174,7 +183,12 @@ export async function driveToTerminal(
         }
         planText = edited.text;
       }
-      await track(approveRun(runId, planText));
+      try {
+        await track(approveRun(runId, planText));
+      } catch (err) {
+        process.stderr.write(`${(err as Error).message}\n`);
+        return EXIT.USAGE;
+      }
       continue;
     }
 
@@ -287,19 +301,20 @@ function installSignalHandler(runId: string): {
   };
 }
 
-const RESUMABLE: RunStatus[] = ["awaiting_approval", "needs_changes"];
-
 export async function resume(id: string): Promise<number> {
   const run = getRun(id);
   if (!run) {
     process.stderr.write(`Run not found: ${id}\n`);
     return EXIT.USAGE;
   }
-  if (!RESUMABLE.includes(run.status)) {
+  // R17: GATE_STATUSES (db.ts) is the one definition of "parked at a gate" — assertNoUnfinishedRun
+  // already recommends `orch resume` based on it 180 lines up, so resume must accept on the same
+  // list or the CLI can recommend a command that then refuses.
+  if (!GATE_STATUSES.includes(run.status)) {
     const hint = ACTIVE_STATUSES.includes(run.status)
       ? ` A run left at ${run.status} has no live process here — clear it with: orch cancel ${id}`
       : "";
-    process.stderr.write(`Run ${id.slice(0, 8)} is ${run.status}, not parked at a gate.${hint}\n`);
+    process.stderr.write(`Run ${id} is ${run.status}, not parked at a gate.${hint}\n`);
     return EXIT.USAGE;
   }
 
@@ -323,6 +338,14 @@ export async function cancel(id: string): Promise<number> {
   if (!run) {
     process.stderr.write(`Run not found: ${id}\n`);
     return EXIT.USAGE;
+  }
+  // Minor 4: read the status before mutating anything. cancelRun early-returns a no-op on a
+  // terminal status, so printing the post-call status unconditionally made `orch cancel <an
+  // approved run>` print "approved" and exit 0 — reading as though the cancel produced that
+  // state. Re-cancelling an already-cancelled run is still a safe no-op, just a clearer one.
+  if (!UNFINISHED_STATUSES.includes(run.status)) {
+    process.stdout.write(`Nothing to cancel — run is already ${run.status}\n`);
+    return EXIT.OK;
   }
   try {
     await cancelRun(id);

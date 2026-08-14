@@ -63,6 +63,9 @@ test("findUnfinishedRuns returns runs parked at a human gate as well as active r
       .sort(),
     ["run-owner", "run-parked"],
   );
+});
+
+test("ACTIVE_STATUSES is exactly planning, executing, reviewing", () => {
   assert.deepEqual([...ACTIVE_STATUSES].sort(), ["executing", "planning", "reviewing"]);
 });
 

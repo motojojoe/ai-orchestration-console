@@ -110,10 +110,14 @@ export async function startRun(runId: string): Promise<void> {
     });
 
     // Spec §6: auto-approve (the default) skips straight to Execute; otherwise wait for /approve.
+    // Both branches pass through awaiting_approval first — approveRun now guards on that status
+    // (R15), and this keeps its precondition the same for every caller instead of carving out a
+    // "planning" exception just for this internal chain. No external process can observe this
+    // transient state and race it: there is no await between this call and approveRun's own
+    // owner_pid write, so nothing else gets a turn on the event loop in between.
+    setStatus(run.id, "awaiting_approval");
     if (run.auto_approve) {
       await approveRun(run.id, stageResult.resultText);
-    } else {
-      setStatus(run.id, "awaiting_approval");
     }
   } catch (err) {
     await failRun(run.id, "plan", err);
@@ -124,6 +128,12 @@ export async function startRun(runId: string): Promise<void> {
 export async function approveRun(runId: string, finalPlanText: string): Promise<void> {
   const run = getRun(runId);
   if (!run?.worktree_path) throw new Error(`Run ${runId} has no active worktree to approve into`);
+  // R15: two processes can both reach this call for the same run (two browser tabs, a resumed
+  // CLI racing the tab that already answered) — refuse anything but the gate status before
+  // mutating anything, the same way closeRun already guards retryExecute's sibling transition.
+  if (run.status !== "awaiting_approval") {
+    throw new Error(`Run ${runId} cannot be approved from status ${run.status}`);
+  }
 
   // Closes the race where auto-approve chains straight from Plan into this git commit — if cancel
   // landed in that gap, no process was registered for gracefulStop to signal (see throwIfCancelled).
@@ -238,6 +248,12 @@ export async function retryExecute(runId: string): Promise<void> {
 export async function rejectRun(runId: string): Promise<void> {
   const run = getRun(runId);
   if (!run) throw new Error(`Run not found: ${runId}`);
+  // R15: same guard as approveRun, same reason — rejecting is destructive (finalizeTerminal), and
+  // without this a run that already moved past the gate would happily get "rejected" out from
+  // under whatever is now driving it.
+  if (run.status !== "awaiting_approval") {
+    throw new Error(`Run ${runId} cannot be rejected from status ${run.status}`);
+  }
   setStatus(runId, "cancelled");
   await finalizeTerminal(getRun(runId)!);
 }
