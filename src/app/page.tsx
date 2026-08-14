@@ -133,9 +133,14 @@ export default function HomePage() {
         )}
 
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <a href="/runs" style={{ fontSize: "0.86rem", color: "var(--ink-60)" }}>
-            View run history →
-          </a>
+          <div style={{ display: "flex", gap: "1rem", fontSize: "0.86rem" }}>
+            <a href="/runs" style={{ color: "var(--ink-60)" }}>
+              View run history →
+            </a>
+            <a href="/docs" style={{ color: "var(--ink-60)" }}>
+              Docs →
+            </a>
+          </div>
           <button type="submit" className="btn btn-primary" disabled={submitting}>
             {submitting ? "Starting…" : "Start run"}
           </button>

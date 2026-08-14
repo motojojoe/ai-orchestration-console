@@ -51,6 +51,12 @@ jobs:
       - name: Test
         run: env -u EDITOR -u VISUAL npm test
 
+      # Every code excerpt under docs/ is anchored to the file it quotes and must still appear there
+      # verbatim. The pre-commit hook runs the same check, but it is client-side: --no-verify skips
+      # it, and a clone where npm install never ran has no hook at all.
+      - name: Check the docs still quote the current source
+        run: npm run check:docs
+
       - name: Build
         run: npm run build
 
@@ -68,6 +74,69 @@ jobs:
       # check hold regardless of what the committer's machine did.
       - name: Secretlint
         run: npx secretlint --secretlintignore .gitignore "**/*"
+
+  # The snippet check in `verify` is a gate because it is decidable: a quoted line either still
+  # exists in the file or it does not. Prose cannot be checked that way — the deck saying "capped at
+  # three retries" stays syntactically fine long after the cap changes. So this job only *asks*, and
+  # is deliberately not a gate: most edits to these files leave the docs perfectly accurate, and a
+  # check that fails on every unrelated refactor is one people learn to ignore.
+  docs-drift:
+    name: docs drift (advisory)
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Ask for a docs re-read when described code changed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          # The files docs/ describes in prose, not just quotes. Keep this list next to the docs it
+          # protects: adding a doc about something else means adding its subject here.
+          described='^src/lib/(cli|orchestrator)/|^src/lib/(git|db)\.ts$'
+
+          changed=$(git diff --name-only "$BASE" "$HEAD")
+          touched_code=$(echo "$changed" | grep -E "$described" || true)
+          touched_docs=$(echo "$changed" | grep -E '^docs/' || true)
+
+          marker='<!-- docs-drift-advisory -->'
+
+          if [ -z "$touched_code" ] || [ -n "$touched_docs" ]; then
+            echo "No advisory needed (code touched: $(echo "$touched_code" | grep -c . || true), docs touched: $(echo "$touched_docs" | grep -c . || true))."
+            exit 0
+          fi
+
+          # One comment per PR, edited in place. A new comment on every push turns an advisory into
+          # spam, which is the fastest way to make people stop reading it.
+          existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --jq \
+            "map(select(.body | startswith(\"$marker\"))) | .[0].id // empty")
+
+          # printf, not an indented heredoc: four leading spaces would turn every line of this
+          # comment into a markdown code block.
+          body=$(printf '%s\n%s\n\n%s\n```\n%s\n```\n\n%s\n' \
+            "$marker" \
+            "**The docs describe the files this PR changes.** The snippet gate in \`verify\` already confirmed every *quoted* excerpt still matches the source. This is about the prose around them, which nothing can check automatically." \
+            "Changed here:" \
+            "$touched_code" \
+            "Give \`docs/\` a read and confirm the surrounding explanation is still true. If it is, no action needed — this comment is advisory and does not block the merge.")
+
+          if [ -n "$existing" ]; then
+            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing}" -f body="$body" > /dev/null
+            echo "Updated the existing advisory comment."
+          else
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -f body="$body" > /dev/null
+            echo "Posted an advisory comment."
+          fi
 
   # Separate job on purpose. `npm audit` can go red without anyone touching this repo, when a new
   # advisory lands against an existing dependency. Keeping it out of `verify` means a drive-by
