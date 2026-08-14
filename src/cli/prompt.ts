@@ -3,6 +3,10 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
+// Value import, and the only one in this file that is not a node: builtin. exit-codes.ts imports
+// nothing but a type from src/lib, so this adds no cycle and nothing for the strip-types test
+// loader to resolve at runtime.
+import { EXIT } from "./exit-codes.ts";
 
 /** Injectable so the failure paths are testable without a real editor. Resolves to an exit code. */
 export type EditorSpawn = (program: string, args: string[]) => Promise<number>;
@@ -14,57 +18,66 @@ export interface AskIO {
 }
 
 /**
- * A promise that never settles. Used below to hold `ask` open across the gap between re-raising
- * SIGINT and the kernel delivering it — see `defaultAskIO`. Safe as an "await forever": a pending
- * promise does not keep the event loop alive on its own, and the SIGINT listener that made this
- * necessary is itself a ref'd libuv handle that does.
+ * How long to hold the event loop open after re-raising SIGINT at ourselves — see `defaultAskIO`.
+ * Delivery itself takes one turn of the loop, so this is really the budget for the CLI's own
+ * handler to finish cancelling and exit. It matches the 30s force-exit that handler already sets
+ * for itself (`installSignalHandler` in commands.ts), so this timer never cuts a cancel short that
+ * the CLI is still legitimately waiting on. Bounded on purpose: an unbounded hold would turn a
+ * stranded run into a hung process.
  */
-function never<T>(): Promise<T> {
-  return new Promise<T>(() => {});
-}
+const INTERRUPT_HOLD_MS = 30_000;
 
 /**
+ * Ctrl-C at a prompt, and why it needs help.
+ *
  * readline's `terminal` option defaults to `output.isTTY`, and a terminal interface puts stdin in
- * **raw mode**, which clears `ISIG`. So a Ctrl-C at a prompt arrives as the byte 0x03 to readline,
- * not as a signal to the process: any `process.on("SIGINT")` handler — the one that cancels the
- * run and cleans up its worktree — never runs. Without a listener of its own readline just closes
- * the interface, which rejects the pending `question` with `ABORT_ERR`; the CLI then unwinds as if
- * a stage had errored (exit 2, not 130) and leaves the run row parked with a dead `owner_pid` and
- * its worktree on disk. Verified under a pty on Node 22.23.1 before this fix.
+ * **raw mode**, which clears `ISIG`. A Ctrl-C therefore arrives as the byte 0x03 to readline, not
+ * as a signal to the process, so a `process.on("SIGINT")` handler — the one that cancels the run
+ * and removes its worktree — never runs on its own.
  *
- * The fix restores the normal contract: close the interface (which takes stdin back out of raw
- * mode, so a *second* Ctrl-C is a real signal again and the double-Ctrl-C escape hatch still
- * works), then re-raise SIGINT at this process so the ordinary handler path runs unchanged. Every
- * `ask` caller is fixed at once, and nothing needs a cancel hook threaded into it.
+ * Two facts about readline drive the shape below. Both were verified under a pty on Node 22.23.1,
+ * and both contradict what an earlier version of this comment claimed:
  *
- * The `never()` is load-bearing, not caution. `rl.close()` rejects the in-flight `question`, and
- * that rejection is a microtask while signal delivery is a turn of the event loop — so letting it
- * unwind would run the caller's `finally` (which removes the very SIGINT listener we just
- * re-raised at) before the signal lands, and the re-raised SIGINT would then hit Node's default
- * disposition and kill the process with no cancellation at all. Holding here until the signal is
- * dispatched is what keeps the handler reachable.
+ * 1. **With a `SIGINT` listener attached, readline emits `SIGINT` and leaves the pending
+ *    `question` promise simply pending.** `Interface.prototype.close` never touches the question's
+ *    reject; the only rejection sites are `_ttyWrite`'s `case 'c'` *else* branch — reached only
+ *    when `listenerCount("SIGINT") === 0` — and `case 'd'`. So attaching this listener is also
+ *    what keeps `ask` from unwinding into the caller's `finally` and tearing down the very SIGINT
+ *    handler being re-raised at. No `catch` is involved, and none is needed.
+ * 2. **A registered `process.on("SIGINT")` listener is not a ref'd libuv handle.**
+ *    `node -e "process.on('SIGINT',()=>{})"` exits 0 immediately, and in this CLI
+ *    `process.getActiveResourcesInfo()` at the prompt is `[]` — `node:sqlite` is synchronous and
+ *    the event emitter is plain memory. Once `rl.close()` pauses stdin, nothing is ref'd at all,
+ *    so Node ends the loop and exits **0** without ever polling for the signal we just raised.
+ *    That was the shipped behavior of the previous attempt: a silent, success-coded exit leaving
+ *    the row at `awaiting_approval` with a dead `owner_pid` and its worktree on disk.
+ *
+ * Hence: close the interface (which also takes stdin back out of raw mode, so a second Ctrl-C is a
+ * real signal again and the double-Ctrl-C escape hatch still works), start one **ref'd** timer to
+ * keep the loop alive long enough for the signal to be delivered and acted on, then re-raise. The
+ * ordinary `installSignalHandler` path then runs unchanged, and every `ask` caller is fixed at
+ * once with no cancel hook threaded through `driveToTerminal`.
+ *
+ * If that timer ever expires, the signal was raised but nothing exited on it. Exiting 130 with a
+ * message is the honest outcome; falling through to a success code is the regression this
+ * replaces.
  */
 const defaultAskIO = (): AskIO => {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
-  let interrupted = false;
 
   rl.once("SIGINT", () => {
-    interrupted = true;
     rl.close();
+    setTimeout(() => {
+      process.stderr.write(
+        `\nInterrupted — nothing acted on it within ${INTERRUPT_HOLD_MS / 1000}s, exiting.\n` +
+          "The run may still need cleaning up:  orch list\n",
+      );
+      process.exit(EXIT.INTERRUPTED);
+    }, INTERRUPT_HOLD_MS);
     process.kill(process.pid, "SIGINT");
   });
 
-  return {
-    question: async (prompt: string): Promise<string> => {
-      try {
-        return await rl.question(prompt);
-      } catch (err) {
-        if (interrupted) return await never<string>();
-        throw err;
-      }
-    },
-    close: () => rl.close(),
-  };
+  return rl;
 };
 
 /**
