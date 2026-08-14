@@ -67,6 +67,29 @@ this class of mistake, so inspect the staged diff before committing:
 git diff --cached | grep -nE '/Users/|/home/|/private/tmp/'
 ```
 
+**This repository is public, and agent-session URLs do not belong in it.** Never write a
+`Claude-Session: https://claude.ai/code/session_…` trailer — or any equivalent link to a private
+agent transcript — into a commit message or a pull-request body here. `Co-Authored-By:` trailers are
+fine and should stay.
+
+Such a URL is not a credential: it is auth-gated, so no other reader can open the transcript. It is
+still an account-scoped identifier that is meaningless to everyone except its owner, and once merged
+it is in public history permanently — the same reasoning as the machine-local-path rule above. The
+provenance it offers is already better served by what this repository actually ships: the *why*
+belongs in the commit message and in this file, where every reader can see it and no session id is
+needed to reach it.
+
+The trap is that the trailer is usually **not** something this repository asked for — it comes from
+the agent harness's own default commit instructions, so it reappears by default and has to be
+omitted deliberately on every commit and every PR body. Check before pushing, not after:
+
+```bash
+git log --format='%B' <base>..<branch> | grep -n 'claude.ai/code/session'
+```
+
+Caught late, the cleanup is a history rewrite. On 2026-08-14 it cost a `filter-branch --msg-filter`
+over 13 commits plus a force-push, and that was the cheap case — the branch had not merged yet.
+
 ### Running more than one agent at a time
 
 **Give each concurrent agent its own git worktree.** A clone has one `HEAD` and one working tree, so
