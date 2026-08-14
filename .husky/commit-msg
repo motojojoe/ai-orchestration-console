@@ -1,0 +1,24 @@
+# Refuse agent-session URLs in commit messages. See AGENTS.md, "Git workflow".
+#
+# This repository is public. A `Claude-Session: https://claude.ai/code/session_…` trailer is an
+# account-scoped identifier that is meaningless to every reader except its owner and permanent once
+# merged. It is not a credential — the URL is auth-gated — but a rewrite is the only way to remove
+# it, and on 2026-08-14 that cost a filter-branch over 13 commits plus a force-push.
+#
+# The trailer comes from the agent harness's own default commit instructions, not from anything this
+# repo asks for, so it reappears by default. Prose in AGENTS.md was not enough; this is the gate.
+#
+# secretlint runs in pre-commit and scans staged file *content* — it never sees the commit message,
+# which is why this needs its own hook.
+
+# Both patterns require an actual URL. Matching a bare `Claude-Session:` at line start also matches
+# prose *about* the trailer — this hook refused its own introducing commit that way, and a rule that
+# blocks people from documenting it is a rule they will disable.
+if grep -nEi 'https?://claude\.ai/code/session_|^[[:space:]]*Claude-Session:[[:space:]]*http' "$1"; then
+  echo ""
+  echo "commit-msg: this repository is public — agent-session URLs do not belong in its history."
+  echo "Remove the line(s) above. Co-Authored-By: trailers are fine and should stay."
+  echo "See AGENTS.md, \"Git workflow\". Rationale: the URL is auth-gated, so it is useless to every"
+  echo "reader but you, and only a history rewrite removes it once merged."
+  exit 1
+fi

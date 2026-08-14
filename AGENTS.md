@@ -81,14 +81,25 @@ needed to reach it.
 
 The trap is that the trailer is usually **not** something this repository asked for — it comes from
 the agent harness's own default commit instructions, so it reappears by default and has to be
-omitted deliberately on every commit and every PR body. Check before pushing, not after:
+omitted deliberately on every commit and every PR body. Prose alone did not hold: 13 commits on
+`feature/orch-cli` carried it, and the cleanup was a `filter-branch --msg-filter` plus a force-push
+on 2026-08-14 — the *cheap* case, because the branch had not merged yet.
+
+So the commit half is now a gate, not a request. **`.husky/commit-msg`** refuses any message
+matching `https://claude.ai/code/session_…` or a `Claude-Session:` trailer. Note that the existing
+`pre-commit` hook cannot do this job: it runs secretlint over staged file *content* and never sees
+the commit message at all.
+
+Two holes the hook does not close, so they stay your responsibility:
+
+- **PR bodies.** No git hook sees them. Check the description before opening a PR, and re-check
+  after any agent edits it.
+- **`--no-verify`** skips the hook entirely, as does an amend run with it. If you bypass hooks for
+  an unrelated reason, re-check the message afterwards:
 
 ```bash
 git log --format='%B' <base>..<branch> | grep -n 'claude.ai/code/session'
 ```
-
-Caught late, the cleanup is a history rewrite. On 2026-08-14 it cost a `filter-branch --msg-filter`
-over 13 commits plus a force-push, and that was the cheap case — the branch had not merged yet.
 
 ### Running more than one agent at a time
 
