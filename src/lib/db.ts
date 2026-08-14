@@ -192,10 +192,41 @@ export function listRecentProjects(limit = 8): string[] {
 /** Statuses that mean a pipeline is mid-flight. Terminal and parked statuses are excluded. */
 export const ACTIVE_STATUSES: RunStatus[] = ["planning", "executing", "reviewing"];
 
-/** Runs a pipeline is currently mid-flight on — whether or not their owning process is alive. */
-export function findActiveRuns(): Run[] {
-  const placeholders = ACTIVE_STATUSES.map(() => "?").join(", ");
+/**
+ * Statuses where a run is parked on a *human*, not on a stage. No process work is happening, but
+ * the run still owns a worktree and still expects someone to come back and answer.
+ */
+export const GATE_STATUSES: RunStatus[] = ["awaiting_approval", "needs_changes"];
+
+/**
+ * Every status a run can still leave — the complement of the pipeline's TERMINAL_STATUSES
+ * (`approved`, `closed_needs_changes`, `failed`, `cancelled`).
+ *
+ * Deliberately separate from `ACTIVE_STATUSES`, which means the narrower "a stage is running" and
+ * is what `cancelRun` branches on. "Is a run unfinished?" and "is a stage running?" answer
+ * different questions: a run parked at a gate is not running anything, yet it still holds a
+ * worktree and still means the machine is occupied. Widening `ACTIVE_STATUSES` to cover the gates
+ * would silently change what `cancelRun` does.
+ */
+export const UNFINISHED_STATUSES: RunStatus[] = [...ACTIVE_STATUSES, ...GATE_STATUSES];
+
+function findRunsByStatus(statuses: RunStatus[]): Run[] {
+  const placeholders = statuses.map(() => "?").join(", ");
   return getDb()
     .prepare(`SELECT * FROM runs WHERE status IN (${placeholders}) ORDER BY created_at DESC`)
-    .all(...ACTIVE_STATUSES) as unknown as Run[];
+    .all(...statuses) as unknown as Run[];
+}
+
+/** Runs a pipeline is currently mid-flight on — whether or not their owning process is alive. */
+export function findActiveRuns(): Run[] {
+  return findRunsByStatus(ACTIVE_STATUSES);
+}
+
+/**
+ * Runs that have not reached a terminal state: mid-stage *or* parked at a human gate. This is the
+ * question "is this machine busy with a run?" — the one worth asking before starting another,
+ * since a gate-parked run whose owner died is the most common way to strand a worktree.
+ */
+export function findUnfinishedRuns(): Run[] {
+  return findRunsByStatus(UNFINISHED_STATUSES);
 }

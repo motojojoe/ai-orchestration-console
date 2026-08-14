@@ -8,8 +8,17 @@ const dir = mkdtempSync(join(tmpdir(), "orch-db-test-"));
 process.env.ORCHESTRATOR_DB_PATH = join(dir, "test.db");
 
 // Dynamic import: ESM hoists static imports above the env assignment above.
-const { ACTIVE_STATUSES, createRun, findActiveRuns, getDb, getRun, updateRun } =
-  await import("./db.ts");
+const {
+  ACTIVE_STATUSES,
+  GATE_STATUSES,
+  UNFINISHED_STATUSES,
+  createRun,
+  findActiveRuns,
+  findUnfinishedRuns,
+  getDb,
+  getRun,
+  updateRun,
+} = await import("./db.ts");
 
 after(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -50,4 +59,49 @@ test("findActiveRuns returns only runs in an active status", () => {
   const active = findActiveRuns();
   assert.deepEqual(active.map((r) => r.id), ["run-owner"]);
   assert.deepEqual([...ACTIVE_STATUSES].sort(), ["executing", "planning", "reviewing"]);
+});
+
+test("findUnfinishedRuns also returns runs parked at a human gate, which findActiveRuns misses", () => {
+  // run-owner is `executing`, run-parked is `needs_changes` (set by the test above). A run parked
+  // at a gate is exactly the case the CLI's busy-check exists for: no stage is running, but the
+  // run still owns a worktree, so starting another pipeline would strand it.
+  assert.deepEqual(findActiveRuns().map((r) => r.id), ["run-owner"]);
+  assert.deepEqual(
+    findUnfinishedRuns()
+      .map((r) => r.id)
+      .sort(),
+    ["run-owner", "run-parked"],
+  );
+});
+
+test("findUnfinishedRuns excludes every terminal status", () => {
+  for (const status of ["approved", "closed_needs_changes", "failed", "cancelled"] as const) {
+    updateRun("run-parked", { status });
+    assert.deepEqual(
+      findUnfinishedRuns().map((r) => r.id),
+      ["run-owner"],
+      `${status} must not count as unfinished`,
+    );
+  }
+  updateRun("run-parked", { status: "awaiting_approval" });
+  assert.equal(findUnfinishedRuns().length, 2);
+});
+
+test("UNFINISHED_STATUSES is exactly the complement of the pipeline's terminal statuses", () => {
+  // Guards against the two lists drifting apart: a status added to RunStatus and to neither list
+  // would silently be treated as finished by the CLI's busy-check.
+  const terminal = ["approved", "closed_needs_changes", "failed", "cancelled"];
+  const all = [...UNFINISHED_STATUSES, ...terminal].sort();
+  assert.deepEqual(all, [
+    "approved",
+    "awaiting_approval",
+    "cancelled",
+    "closed_needs_changes",
+    "executing",
+    "failed",
+    "needs_changes",
+    "planning",
+    "reviewing",
+  ]);
+  assert.deepEqual([...GATE_STATUSES].sort(), ["awaiting_approval", "needs_changes"]);
 });

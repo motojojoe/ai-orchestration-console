@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import * as commands from "./commands";
 import { EXIT } from "./exit-codes";
@@ -36,7 +37,13 @@ async function main(argv: string[]): Promise<number> {
         process.stderr.write('run needs a task, e.g. orch run "add a health endpoint"\n');
         return EXIT.USAGE;
       }
-      return commands.run(arg, values.project ?? process.cwd());
+      // resolve() here, at the boundary where the untrusted value enters: project_path is
+      // persisted and later read by other processes with other working directories (orch cancel,
+      // the web app). git.ts derives worktree_path from it verbatim, so a relative --project
+      // stores a relative worktree_path, and removeRunWorktree's existsSync() guard then finds
+      // nothing and returns success without removing anything — an orphaned worktree, silently.
+      // process.cwd() is already absolute; only the flag is the hole.
+      return commands.run(arg, resolve(values.project ?? process.cwd()));
     }
     default:
       process.stderr.write(USAGE);

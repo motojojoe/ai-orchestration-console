@@ -13,7 +13,59 @@ export interface AskIO {
   close(): void;
 }
 
-const defaultAskIO = (): AskIO => createInterface({ input: process.stdin, output: process.stdout });
+/**
+ * A promise that never settles. Used below to hold `ask` open across the gap between re-raising
+ * SIGINT and the kernel delivering it — see `defaultAskIO`. Safe as an "await forever": a pending
+ * promise does not keep the event loop alive on its own, and the SIGINT listener that made this
+ * necessary is itself a ref'd libuv handle that does.
+ */
+function never<T>(): Promise<T> {
+  return new Promise<T>(() => {});
+}
+
+/**
+ * readline's `terminal` option defaults to `output.isTTY`, and a terminal interface puts stdin in
+ * **raw mode**, which clears `ISIG`. So a Ctrl-C at a prompt arrives as the byte 0x03 to readline,
+ * not as a signal to the process: any `process.on("SIGINT")` handler — the one that cancels the
+ * run and cleans up its worktree — never runs. Without a listener of its own readline just closes
+ * the interface, which rejects the pending `question` with `ABORT_ERR`; the CLI then unwinds as if
+ * a stage had errored (exit 2, not 130) and leaves the run row parked with a dead `owner_pid` and
+ * its worktree on disk. Verified under a pty on Node 22.23.1 before this fix.
+ *
+ * The fix restores the normal contract: close the interface (which takes stdin back out of raw
+ * mode, so a *second* Ctrl-C is a real signal again and the double-Ctrl-C escape hatch still
+ * works), then re-raise SIGINT at this process so the ordinary handler path runs unchanged. Every
+ * `ask` caller is fixed at once, and nothing needs a cancel hook threaded into it.
+ *
+ * The `never()` is load-bearing, not caution. `rl.close()` rejects the in-flight `question`, and
+ * that rejection is a microtask while signal delivery is a turn of the event loop — so letting it
+ * unwind would run the caller's `finally` (which removes the very SIGINT listener we just
+ * re-raised at) before the signal lands, and the re-raised SIGINT would then hit Node's default
+ * disposition and kill the process with no cancellation at all. Holding here until the signal is
+ * dispatched is what keeps the handler reachable.
+ */
+const defaultAskIO = (): AskIO => {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  let interrupted = false;
+
+  rl.once("SIGINT", () => {
+    interrupted = true;
+    rl.close();
+    process.kill(process.pid, "SIGINT");
+  });
+
+  return {
+    question: async (prompt: string): Promise<string> => {
+      try {
+        return await rl.question(prompt);
+      } catch (err) {
+        if (interrupted) return await never<string>();
+        throw err;
+      }
+    },
+    close: () => rl.close(),
+  };
+};
 
 /**
  * Asks until one of `choices` is entered. Comparison is case-insensitive, and the value returned

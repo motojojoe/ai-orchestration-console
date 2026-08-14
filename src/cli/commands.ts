@@ -1,4 +1,4 @@
-import { ACTIVE_STATUSES, findActiveRuns, getRun, listRuns, type Run, type RunStatus } from "../lib/db";
+import { GATE_STATUSES, findUnfinishedRuns, getRun, listRuns, type Run } from "../lib/db";
 import { validateProject } from "../lib/git";
 import { isPidAlive } from "../lib/orchestrator/control";
 import { subscribeRunEvents } from "../lib/orchestrator/events";
@@ -84,20 +84,44 @@ export async function doctor(): Promise<number> {
  * SPEC §1 says one pipeline at a time, and nothing in the code enforces it. This is advisory: two
  * `orch run` invocations racing between here and createRun can still both proceed. It narrows the
  * window and, more usefully, makes a stranded run visible with its remedy.
+ *
+ * The question asked is `findUnfinishedRuns`, not `findActiveRuns`: "a stage is running" is too
+ * narrow. A run parked at `awaiting_approval` or `needs_changes` is where a run spends most of its
+ * wall-clock time and is by far the likeliest thing to be stranded — close the terminal while
+ * reading a plan and the row keeps a dead `owner_pid` and its worktree under
+ * `.orchestrator-worktrees/` with nothing pointing at it. Checking only active statuses let a
+ * second pipeline start on top of exactly that.
  */
-function assertNoActiveRun(): string | null {
-  const [active] = findActiveRuns();
-  if (!active) return null;
-  if (isPidAlive(active.owner_pid)) {
-    return `Run ${active.id.slice(0, 8)} is already ${active.status} (pid ${active.owner_pid}).`;
+function assertNoUnfinishedRun(): string | null {
+  const [busy] = findUnfinishedRuns();
+  if (!busy) return null;
+  const short = busy.id.slice(0, 8);
+  const atGate = GATE_STATUSES.includes(busy.status);
+
+  // A live owner is a legitimately busy run, not a stranded one — including at a gate, where the
+  // owner is simply sitting at a prompt in another terminal.
+  if (isPidAlive(busy.owner_pid)) {
+    const where = atGate ? " — answer the prompt in that terminal" : "";
+    return `Run ${short} is already ${busy.status} (pid ${busy.owner_pid})${where}.`;
   }
-  return (
-    `Run ${active.id.slice(0, 8)} is stuck at ${active.status} — its process is gone. ` +
-    `Clear it with: orch cancel ${active.id}`
-  );
+
+  // owner_pid dead, or null (a row written before the owner_pid migration): nobody is driving it.
+  const remedy = atGate
+    ? `Clear it with: orch cancel ${busy.id} — or pick it back up with: orch resume ${busy.id}`
+    : `Clear it with: orch cancel ${busy.id}`;
+  return `Run ${short} is stuck at ${busy.status} — its process is gone. ${remedy}`;
 }
 
-/** Prints the branch and cost once a run reaches a terminal state. */
+/**
+ * Prints the branch and cost once a run reaches a terminal state.
+ *
+ * The diff hint deliberately does not name a base branch. The run's base is whatever `HEAD` was
+ * when `git worktree add` ran, which is not necessarily `main` — this repo's own workflow branches
+ * off `develop` — so a hardcoded `git diff main..<branch>` prints a command that quietly shows the
+ * wrong range. `plan_commit_sha` is a fact about this run, recorded on the row, and diffing from
+ * it is exactly the range Review was shown (`computeDiff` uses the same base). If the run never
+ * got that far, there is nothing true to suggest, so nothing is printed.
+ */
 function printSummary(run: Run): void {
   const cost = [run.plan_cost_usd, run.execute_cost_usd, run.review_cost_usd]
     .filter((c): c is number => c !== null)
@@ -106,7 +130,11 @@ function printSummary(run: Run): void {
   if (run.error_message) process.stdout.write(`${run.error_message}\n`);
   if (run.review_reasoning) process.stdout.write(`\n${run.review_reasoning}\n`);
   process.stdout.write(`\nbranch  ${run.branch_name}\ncost    $${cost.toFixed(4)}\n`);
-  process.stdout.write(`\n  git diff main..${run.branch_name}\n`);
+  if (run.plan_commit_sha) {
+    process.stdout.write(
+      `\n  git diff ${run.plan_commit_sha.slice(0, 12)}..${run.branch_name}   # what Execute changed\n`,
+    );
+  }
 }
 
 /**
@@ -144,16 +172,16 @@ export async function driveToTerminal(
     if (run.status === "needs_changes") {
       process.stdout.write(`\n${run.review_reasoning ?? "(no reasoning recorded)"}\n`);
       const choice = await ask("Retry Execute with this feedback?", ["r", "c"]);
-      if (choice === "r") {
-        try {
-          await track(retryExecute(runId));
-        } catch (err) {
-          // Retry cap, or a status that moved underneath us. Not a pipeline failure.
-          process.stderr.write(`${(err as Error).message}\n`);
-          return EXIT.USAGE;
-        }
-      } else {
-        await track(closeRun(runId));
+      try {
+        // Both throw for the same reason — a status that moved underneath the CLI (and
+        // retryExecute additionally for the retry cap) — so both are caught the same way.
+        // Leaving `closeRun` unwrapped let that stack escape all the way to index.ts.
+        if (choice === "r") await track(retryExecute(runId));
+        else await track(closeRun(runId));
+      } catch (err) {
+        // A user-facing constraint, not a pipeline failure: nothing was recorded as failed.
+        process.stderr.write(`${(err as Error).message}\n`);
+        return EXIT.USAGE;
       }
       continue;
     }
@@ -175,7 +203,7 @@ export async function run(task: string, projectPath: string): Promise<number> {
     process.stderr.write(`${creds.reason}\n`);
     return EXIT.USAGE;
   }
-  const busy = assertNoActiveRun();
+  const busy = assertNoUnfinishedRun();
   if (busy) {
     process.stderr.write(`${busy}\n`);
     return EXIT.USAGE;
