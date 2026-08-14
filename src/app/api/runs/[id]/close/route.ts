@@ -10,6 +10,12 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     return NextResponse.json({ error: `Run cannot be closed from status ${run.status}` }, { status: 409 });
   }
 
-  await closeRun(id);
+  // Same as reject/route.ts: closeRun's own status guard is a refusal, not a crash, and an
+  // unhandled throw turned it into a 500 with a stack.
+  try {
+    await closeRun(id);
+  } catch (err) {
+    return NextResponse.json({ error: (err as Error).message }, { status: 409 });
+  }
   return NextResponse.json({ ok: true });
 }

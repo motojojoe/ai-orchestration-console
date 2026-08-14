@@ -53,7 +53,12 @@ async function failRun(runId: string, stage: "plan" | "execute" | "review", err:
   const message = err instanceof Error ? err.message : String(err);
 
   if (isCancelled(runId)) {
-    setStatus(runId, "cancelled", { error_message: message, failed_stage: stage });
+    // A cancelled run carries no failed stage and no stage error. The message here is whatever the
+    // killed child said on its way out — "opencode exited with code null: …" for a deliberate
+    // Ctrl-C — and both `orch show` and the web console render `failed_stage` + `error_message`
+    // verbatim, so recording them made every intentional cancel read as a run that failed in
+    // Execute. Cleared rather than left alone: a stage may have recorded them before the cancel.
+    setStatus(runId, "cancelled", { error_message: null, failed_stage: null });
   } else {
     setStatus(runId, "failed", { error_message: message, failed_stage: stage });
     emitRunEvent(runId, {
@@ -84,8 +89,17 @@ export async function startRun(runId: string): Promise<void> {
   if (!run) throw new Error(`Run not found: ${runId}`);
 
   try {
+    // owner_pid is stamped *before* the worktree is created, not with it. `git worktree add` takes
+    // real time on a large repo, and a cancel arriving in that window used to find owner_pid still
+    // null: cancelRun failed its `owner_pid === process.pid` test, took the fall-through, and wrote
+    // a terminal `cancelled` row — while this function carried on and wrote owner_pid and
+    // worktree_path back onto it, leaving a row no command could clean up and a worktree on disk.
+    // Stamped first, the same cancel takes the owner branch (flag and return), the row stays
+    // `planning`, and runStage's throwIfCancelled converts it through failRun, which removes the
+    // worktree that by then exists. The write-back below is what makes that removal possible.
+    updateRun(run.id, { owner_pid: process.pid });
     const { worktreePath } = await createRunWorktree(run.project_path, run.id);
-    updateRun(run.id, { worktree_path: worktreePath, owner_pid: process.pid });
+    updateRun(run.id, { worktree_path: worktreePath });
 
     const handle = runClaude({
       cwd: worktreePath,
@@ -138,12 +152,32 @@ export async function startRun(runId: string): Promise<void> {
  * refused before anything is written, the same way `closeRun` guards its own transition.
  */
 export async function approveRun(runId: string, finalPlanText: string): Promise<void> {
-  const run = getRun(runId);
-  if (!run?.worktree_path) throw new Error(`Run ${runId} has no active worktree to approve into`);
-  if (run.status !== "awaiting_approval") {
-    throw new Error(`Run ${runId} cannot be approved from status ${run.status}`);
-  }
+  const refusal = approvalRefusal(runId);
+  if (refusal) throw new Error(refusal);
   await approvePlan(runId, finalPlanText);
+}
+
+/**
+ * `approveRun`'s permission check as a value rather than a throw, so a caller that cannot await
+ * the answer can still ask the question. `approveRun` awaits the *entire* pipeline — approvePlan
+ * chains into runExecuteAndReview — so `POST /approve` cannot learn the verdict by awaiting it
+ * without holding the HTTP response open for the whole run. It calls this instead, in the same
+ * tick as `approveRun`; with no await in between, nothing can move the row in the gap, so the
+ * answer the browser is given and the decision the pipeline makes cannot disagree.
+ *
+ * Status is tested before `worktree_path` deliberately: `finalizeTerminal` nulls `worktree_path`,
+ * so a terminal run fails both tests and the ordering decides which reason the user is told.
+ * "cannot be approved from status approved" is the true one; "has no active worktree" describes a
+ * consequence and reads like corruption.
+ */
+export function approvalRefusal(runId: string): string | null {
+  const run = getRun(runId);
+  if (!run) return `Run not found: ${runId}`;
+  if (run.status !== "awaiting_approval") {
+    return `Run ${runId} cannot be approved from status ${run.status}`;
+  }
+  if (!run.worktree_path) return `Run ${runId} has no active worktree to approve into`;
+  return null;
 }
 
 /** Commits the — possibly user-edited — plan and starts Execute. Assumes the caller may do this. */

@@ -10,6 +10,13 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     return NextResponse.json({ error: `Run is not awaiting approval (status: ${run.status})` }, { status: 409 });
   }
 
-  await rejectRun(id);
+  // rejectRun re-checks the status itself and throws if it moved. Unhandled, that surfaced as a
+  // 500 with a stack for what is a refusal, not a crash — the same condition this route answers
+  // with a 409 above.
+  try {
+    await rejectRun(id);
+  } catch (err) {
+    return NextResponse.json({ error: (err as Error).message }, { status: 409 });
+  }
   return NextResponse.json({ ok: true });
 }

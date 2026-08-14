@@ -64,12 +64,21 @@ export class RunCancelledError extends Error {}
 /**
  * Runs a CLI stage under the per-stage timeout (spec §8, default 15 min). Registers the stage's
  * kill function so `cancelRun` can reach it while it's in flight.
+ *
+ * The cancellation check at the top is not the same one inside the race below. That one asks "was
+ * this cancelled while the stage ran"; this one asks "was it already cancelled before the stage
+ * was handed over" — true whenever a cancel landed in a window where no stage was registered for
+ * `gracefulStop` to signal, most reachably while `createRunWorktree` was still running. Without
+ * it, the stage was simply awaited: the pipeline sat on an already-cancelled run for up to the
+ * full 15-minute timeout, and what ended the process was the CLI's 30s force-exit, which leaves
+ * behind everything a clean cancel would have removed.
  */
 export async function runStage<T>(
   runId: string,
   handle: { result: Promise<T>; kill: (signal: NodeJS.Signals) => void },
   timeoutMs = DEFAULT_STAGE_TIMEOUT_MS,
 ): Promise<T> {
+  throwIfCancelled(runId);
   const controller = getController(runId);
   controller.kill = handle.kill;
 

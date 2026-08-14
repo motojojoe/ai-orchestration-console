@@ -34,7 +34,22 @@ export async function validateProject(projectPath: string): Promise<ValidationRe
     return { ok: false, reason: `Not a git repository: ${projectPath}` };
   }
 
-  const { stdout: status } = await runGit(["status", "--porcelain"], projectPath);
+  // The exclusion is not cosmetic. `createRunWorktree` puts every run's worktree at
+  // `<project>/.orchestrator-worktrees/run-<id>`, inside the project, so `git status --porcelain`
+  // reports `?? .orchestrator-worktrees/` for as long as any run is live or stranded. Without this
+  // the orchestrator's own bookkeeping made the project look dirty and refused the next run with
+  // "commit or stash them" — advice that is wrong (the directory is ours, and committing it would
+  // be worse than useless), and which spoke over the stranded-run message that names the actual
+  // remedy. It refused `POST /api/runs` the same way, so one leftover worktree bricked both
+  // interfaces for that project until someone deleted the directory by hand.
+  //
+  // A pathspec list of nothing but exclusions implies a match-all first, so this still checks the
+  // whole tree rather than only the current directory — verified against git 2.54 with a live run
+  // worktree present: excluded clean, and a genuinely modified/untracked file still reported.
+  const { stdout: status } = await runGit(
+    ["status", "--porcelain", "--", ":(exclude).orchestrator-worktrees"],
+    projectPath,
+  );
   if (status.trim().length > 0) {
     return {
       ok: false,
