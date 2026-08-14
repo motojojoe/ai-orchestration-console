@@ -56,3 +56,12 @@ test("OpenCode text events nest their text under part.text", () => {
   });
   assert.equal(line, "writing file\n");
 });
+
+test("OpenCode's step_start renders a working indicator", () => {
+  const line = renderEvent({
+    type: "cli_event",
+    stage: "execute",
+    data: { type: "step_start" },
+  });
+  assert.equal(line, "  → working…\n");
+});

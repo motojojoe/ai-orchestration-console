@@ -7,17 +7,35 @@ import { createInterface } from "node:readline/promises";
 /** Injectable so the failure paths are testable without a real editor. Resolves to an exit code. */
 export type EditorSpawn = (program: string, args: string[]) => Promise<number>;
 
-/** Asks until one of `choices` is entered. Comparison is case-insensitive. */
-export async function ask(question: string, choices: string[]): Promise<string> {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+/** Injectable so `ask`'s loop is testable without a real TTY. Mirrors `EditorSpawn`'s shape. */
+export interface AskIO {
+  question(prompt: string): Promise<string>;
+  close(): void;
+}
+
+const defaultAskIO = (): AskIO => createInterface({ input: process.stdin, output: process.stdout });
+
+/**
+ * Asks until one of `choices` is entered. Comparison is case-insensitive, and the value returned
+ * is the matching entry from `choices` itself — never the user's raw casing. That matters:
+ * comparing a lowercased answer against the raw `choices` array (the original bug here) means a
+ * caller passing anything but all-lowercase choices, e.g. `["Y", "n"]`, can never match — the
+ * loop re-prompts forever, naming the exact input it just rejected, with no way out but Ctrl-C.
+ */
+export async function ask(
+  question: string,
+  choices: string[],
+  io: AskIO = defaultAskIO(),
+): Promise<string> {
   try {
     for (;;) {
-      const answer = (await rl.question(`${question} [${choices.join("/")}] `)).trim().toLowerCase();
-      if (choices.includes(answer)) return answer;
+      const answer = (await io.question(`${question} [${choices.join("/")}] `)).trim().toLowerCase();
+      const match = choices.find((c) => c.toLowerCase() === answer);
+      if (match) return match;
       process.stdout.write(`Please answer one of: ${choices.join(", ")}\n`);
     }
   } finally {
-    rl.close();
+    io.close();
   }
 }
 

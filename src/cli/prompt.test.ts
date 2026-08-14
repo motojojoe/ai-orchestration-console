@@ -1,7 +1,38 @@
 import { strict as assert } from "node:assert";
 import { readFileSync, writeFileSync } from "node:fs";
 import { test } from "node:test";
-import { editText, resolveEditor } from "./prompt.ts";
+import { ask, editText, resolveEditor, type AskIO } from "./prompt.ts";
+
+/** Feeds canned answers to `ask` without a real TTY. Never runs out — repeats the last answer. */
+function stubAskIO(answers: string[]): AskIO {
+  let i = 0;
+  return {
+    question: async () => answers[Math.min(i++, answers.length - 1)] ?? "",
+    close: () => {},
+  };
+}
+
+test("ask matches case-insensitively and returns the choice as given, not the user's raw casing", async () => {
+  const result = await ask("Continue?", ["Y", "n"], stubAskIO(["y"]));
+  assert.equal(result, "Y");
+});
+
+test("ask does not loop forever when choices aren't lowercase — the original bug", async () => {
+  // Regression: comparing a lowercased answer against the raw (unnormalized) choices array meant
+  // ["Y", "n"] could never match a lowercase reply, so the prompt would re-ask forever. A second
+  // canned answer proves the loop can still terminate at all once the first is accepted.
+  const io = stubAskIO(["y"]);
+  const result = await Promise.race([
+    ask("Continue?", ["Y", "n"], io),
+    new Promise<string>((_, reject) => setTimeout(() => reject(new Error("ask never resolved")), 500)),
+  ]);
+  assert.equal(result, "Y");
+});
+
+test("ask reprompts on an unrecognised answer, then accepts a later valid one", async () => {
+  const result = await ask("Continue?", ["Y", "n"], stubAskIO(["nope", "N"]));
+  assert.equal(result, "n");
+});
 
 test("VISUAL wins over EDITOR, and arguments are split off", () => {
   assert.deepEqual(resolveEditor({ VISUAL: "code --wait", EDITOR: "vi" }), {
