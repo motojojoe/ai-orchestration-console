@@ -60,5 +60,7 @@ run cancels it, so there is nothing left to resume. `orch list` shows what is re
 
 The live stage log belongs to whichever process owns the run — the web console cannot show the log
 of a CLI run, and vice versa. Everything persisted (plan, diff, verdict, cost) is visible in both.
-Both refuse to start a second pipeline while one is unfinished, and `orch run` names the remedy:
-answer the prompt in the terminal that owns it, or `orch cancel <id>` if nothing does.
+`orch run` refuses to start a second pipeline while one is unfinished, and names the remedy: answer
+the prompt in the terminal that owns it, or `orch cancel <id>` if nothing does. That check is the
+CLI's alone — the web console starts a run without it, so nothing stops a browser tab from starting
+a second pipeline alongside a CLI one.
