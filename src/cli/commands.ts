@@ -1,8 +1,17 @@
-import { GATE_STATUSES, findUnfinishedRuns, getRun, listRuns, type Run } from "../lib/db";
+import {
+  ACTIVE_STATUSES,
+  GATE_STATUSES,
+  findUnfinishedRuns,
+  getRun,
+  listRuns,
+  type Run,
+  type RunStatus,
+} from "../lib/db";
 import { validateProject } from "../lib/git";
 import { isPidAlive } from "../lib/orchestrator/control";
 import { subscribeRunEvents } from "../lib/orchestrator/events";
 import {
+  RunOwnedElsewhereError,
   approveRun,
   cancelRun,
   closeRun,
@@ -276,4 +285,56 @@ function installSignalHandler(runId: string): {
       return () => process.off("SIGINT", onSigint);
     },
   };
+}
+
+const RESUMABLE: RunStatus[] = ["awaiting_approval", "needs_changes"];
+
+export async function resume(id: string): Promise<number> {
+  const run = getRun(id);
+  if (!run) {
+    process.stderr.write(`Run not found: ${id}\n`);
+    return EXIT.USAGE;
+  }
+  if (!RESUMABLE.includes(run.status)) {
+    const hint = ACTIVE_STATUSES.includes(run.status)
+      ? ` A run left at ${run.status} has no live process here — clear it with: orch cancel ${id}`
+      : "";
+    process.stderr.write(`Run ${id.slice(0, 8)} is ${run.status}, not parked at a gate.${hint}\n`);
+    return EXIT.USAGE;
+  }
+
+  process.stdout.write(`run ${run.id}\nbranch ${run.branch_name}\n`);
+  const unsubscribe = subscribeRunEvents(run.id, (event) => {
+    const line = renderEvent(event);
+    if (line) process.stdout.write(line);
+  });
+  const { track, install } = installSignalHandler(run.id);
+  const restore = install();
+  try {
+    return await driveToTerminal(run.id, track);
+  } finally {
+    restore();
+    unsubscribe();
+  }
+}
+
+export async function cancel(id: string): Promise<number> {
+  const run = getRun(id);
+  if (!run) {
+    process.stderr.write(`Run not found: ${id}\n`);
+    return EXIT.USAGE;
+  }
+  try {
+    await cancelRun(id);
+  } catch (err) {
+    // A run another live process is driving is a refusal, not a failure: finalizeTerminal deletes
+    // worktrees outright, and doing that under someone else's Execute destroys uncommitted work.
+    if (err instanceof RunOwnedElsewhereError) {
+      process.stderr.write(`${err.message}\n`);
+      return EXIT.USAGE;
+    }
+    throw err;
+  }
+  process.stdout.write(`${getRun(id)!.status}\n`);
+  return EXIT.OK;
 }

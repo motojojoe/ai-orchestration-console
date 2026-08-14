@@ -45,6 +45,18 @@ async function main(argv: string[]): Promise<number> {
       // process.cwd() is already absolute; only the flag is the hole.
       return commands.run(arg, resolve(values.project ?? process.cwd()));
     }
+    case "resume":
+      if (!arg) {
+        process.stderr.write("resume needs a run id\n");
+        return EXIT.USAGE;
+      }
+      return commands.resume(arg);
+    case "cancel":
+      if (!arg) {
+        process.stderr.write("cancel needs a run id\n");
+        return EXIT.USAGE;
+      }
+      return commands.cancel(arg);
     default:
       process.stderr.write(USAGE);
       return EXIT.USAGE;

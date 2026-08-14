@@ -217,11 +217,6 @@ function findRunsByStatus(statuses: RunStatus[]): Run[] {
     .all(...statuses) as unknown as Run[];
 }
 
-/** Runs a pipeline is currently mid-flight on — whether or not their owning process is alive. */
-export function findActiveRuns(): Run[] {
-  return findRunsByStatus(ACTIVE_STATUSES);
-}
-
 /**
  * Runs that have not reached a terminal state: mid-stage *or* parked at a human gate. This is the
  * question "is this machine busy with a run?" — the one worth asking before starting another,

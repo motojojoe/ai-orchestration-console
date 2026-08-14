@@ -13,7 +13,6 @@ const {
   GATE_STATUSES,
   UNFINISHED_STATUSES,
   createRun,
-  findActiveRuns,
   findUnfinishedRuns,
   getDb,
   getRun,
@@ -45,7 +44,7 @@ test("owner_pid round-trips through updateRun", () => {
   assert.equal(getRun("run-owner")!.owner_pid, null);
 });
 
-test("findActiveRuns returns only runs in an active status", () => {
+test("findUnfinishedRuns returns runs parked at a human gate as well as active runs", () => {
   createRun({
     id: "run-parked",
     project_path: "/tmp/project",
@@ -56,22 +55,15 @@ test("findActiveRuns returns only runs in an active status", () => {
   updateRun("run-parked", { status: "needs_changes" });
   updateRun("run-owner", { status: "executing" });
 
-  const active = findActiveRuns();
-  assert.deepEqual(active.map((r) => r.id), ["run-owner"]);
-  assert.deepEqual([...ACTIVE_STATUSES].sort(), ["executing", "planning", "reviewing"]);
-});
-
-test("findUnfinishedRuns also returns runs parked at a human gate, which findActiveRuns misses", () => {
-  // run-owner is `executing`, run-parked is `needs_changes` (set by the test above). A run parked
-  // at a gate is exactly the case the CLI's busy-check exists for: no stage is running, but the
-  // run still owns a worktree, so starting another pipeline would strand it.
-  assert.deepEqual(findActiveRuns().map((r) => r.id), ["run-owner"]);
+  // A run parked at a gate is exactly the case the CLI's busy-check exists for: no stage is
+  // running, but the run still owns a worktree, so starting another pipeline would strand it.
   assert.deepEqual(
     findUnfinishedRuns()
       .map((r) => r.id)
       .sort(),
     ["run-owner", "run-parked"],
   );
+  assert.deepEqual([...ACTIVE_STATUSES].sort(), ["executing", "planning", "reviewing"]);
 });
 
 test("findUnfinishedRuns excludes every terminal status", () => {
