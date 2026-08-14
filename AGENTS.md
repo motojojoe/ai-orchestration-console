@@ -52,7 +52,23 @@ given tool is fail-closed on the strength of this document alone.
 
 This repo follows **gitflow** — never commit directly to `main`. Do work on a `feature/*` (or
 `fix/*`) branch off `develop` and merge back through a PR; `main` only receives merges from
-`develop` or release/hotfix branches.
+`develop` or release/hotfix branches. `main` and `develop` both carry branch protection, and
+`.husky/pre-push` refuses a direct push to either.
+
+**Both guards are needed, because protection alone does not cover this.** GitHub's "require a pull
+request" rule is satisfied when the pushed commits *already belong to an open PR into that branch* —
+so `git push origin <branch>:develop` is accepted and **merges that PR**. On 2026-08-14 that merged
+PR #13 by accident, from a command run only to verify protection was working. The identical command
+against `main` was correctly rejected, because no PR existed for those commits. Same command,
+opposite outcome, and nothing at the call site made the difference visible. The `pre-push` hook has
+no such exception: it refuses on the destination ref name. Override deliberately with
+`ALLOW_TRUNK_PUSH=1`, never with `--no-verify` (which also disables the commit-msg gate).
+
+The wider rule that came out of that incident: **a command run to _verify_ something is still an
+action if it mutates shared state.** Read the setting back through the API instead. If a negative
+test really is needed, use a target with nothing at stake — a throwaway commit with no PR behind it
+would have proved the same thing and merged nothing. And re-check a probe's premise before reusing
+it against a different branch; that is the step whose absence caused the accident.
 
 Never commit a resolved machine-local absolute path or generated local identifier. Use a
 repo-relative path, derive it at runtime, document an environment variable, or use an explicit

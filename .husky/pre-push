@@ -1,0 +1,39 @@
+# Refuse a direct push to a trunk branch. See AGENTS.md, "Git workflow".
+#
+# This exists because branch protection did not stop it. On 2026-08-14 a push of
+# `feature/orch-cli:develop` — run to *verify* that protection worked — was accepted and merged
+# PR #13 by accident. GitHub's "require a pull request" rule is satisfied when the pushed commits
+# already belong to an open PR into that branch, so protection had no objection. The same command
+# against `main`, which had no such PR, was correctly rejected. Identical command, opposite result,
+# and the difference was invisible at the call site.
+#
+# This hook has no such exception: it refuses by destination ref name, whether or not a PR exists.
+# git feeds us one line per ref on stdin: <local_ref> <local_sha> <remote_ref> <remote_sha>
+#
+# Deliberate override, for the rare legitimate case (setting up a new trunk, an authorized hotfix):
+#   ALLOW_TRUNK_PUSH=1 git push origin <branch>:<trunk>
+# Use that rather than --no-verify, which disables every hook including the commit-msg gate.
+
+[ "${ALLOW_TRUNK_PUSH-}" = "1" ] && exit 0
+
+blocked=""
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  case "$remote_ref" in
+    refs/heads/main|refs/heads/develop)
+      blocked="$blocked $remote_ref"
+      ;;
+  esac
+done
+
+if [ -n "$blocked" ]; then
+  echo "pre-push: refusing to push directly to:$blocked"
+  echo ""
+  echo "This repo is gitflow: trunk branches change only through a merged pull request."
+  echo "Branch protection alone does NOT cover this — a push whose commits already belong to an"
+  echo "open PR into that branch is accepted, and merges the PR. That is how PR #13 was merged by"
+  echo "accident on 2026-08-14, by a command run only to check that protection worked."
+  echo ""
+  echo "Open a PR instead:  gh pr create --base develop --head <your-branch>"
+  echo "If you genuinely mean it:  ALLOW_TRUNK_PUSH=1 git push ..."
+  exit 1
+fi
