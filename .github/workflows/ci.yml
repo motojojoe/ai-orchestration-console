@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  workflow_dispatch:
+
+# A rapid series of agent-driven pushes should not stack runs. Never cancel on a trunk branch,
+# where the run is the record of whether that commit was good.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # node-version-file tracks .nvmrc instead of duplicating the pin. engine-strict=true in
+      # .npmrc plus "npm": ">=10.9.0 <11" in engines means npm ci fails loudly on a runner with
+      # npm 11 rather than silently rewriting package-lock.json. That failure is the point.
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Record the toolchain actually in use
+        run: |
+          echo "node $(node --version)"
+          echo "npm  $(npm --version)"
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # `env -u EDITOR -u VISUAL` is load-bearing, not defensive. `npm run` injects EDITOR=vi from
+      # npm's own config default, which once masked four failing tests that read process.env
+      # directly. A gate that reports green only under one launcher is not a gate.
+      #
+      # Note also that `node --test src/` discovers no .ts tests on Node 22, so package.json's test
+      # script carries an explicit file list. A new test file that is not appended to that list
+      # never runs and the suite still passes. CI inherits that trap; it does not fix it.
+      - name: Test
+        run: env -u EDITOR -u VISUAL npm test
+
+      - name: Build
+        run: npm run build
+
+      # bin/ is gitignored, so nothing else checks that the CLI bundle still builds. The
+      # constraints that break it are silent ones: no shebang in source (esbuild would emit a
+      # second one ahead of --banner:js) and no top-level await under --format=cjs.
+      - name: Build the orch CLI
+        run: |
+          npm run build:cli
+          test -x bin/orch.js
+          node bin/orch.js --help > /dev/null
+
+      # The pre-commit hook is client-side: bypassable with --no-verify, and absent entirely in a
+      # clone where npm install never ran, since husky wires it through `prepare`. This makes the
+      # check hold regardless of what the committer's machine did.
+      - name: Secretlint
+        run: npx secretlint --secretlintignore .gitignore "**/*"
+
+  # Separate job on purpose. `npm audit` can go red without anyone touching this repo, when a new
+  # advisory lands against an existing dependency. Keeping it out of `verify` means a drive-by
+  # advisory stays visible without blocking an unrelated PR from merging. See the discussion in #9.
+  audit:
+    name: audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm audit --audit-level=high
