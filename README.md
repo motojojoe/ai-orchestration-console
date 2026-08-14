@@ -56,7 +56,9 @@ gesture that produced it.
 
 `orch resume` exists for runs **this** terminal is not holding: one started in the web console, or
 one orphaned when its process was killed outright. It is not an undo for `Ctrl-C` — interrupting a
-run cancels it, so there is nothing left to resume. `orch list` shows what is resumable.
+run cancels it, so there is nothing left to resume. `orch list` prints the 20 most recent runs of
+every status without marking any of them; the resumable ones are those listed as
+`awaiting_approval` or `needs_changes`.
 
 The live stage log belongs to whichever process owns the run — the web console cannot show the log
 of a CLI run, and vice versa. Everything persisted (plan, diff, verdict, cost) is visible in both.

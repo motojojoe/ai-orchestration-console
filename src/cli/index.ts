@@ -10,18 +10,45 @@ const USAGE = `usage:
   orch show <id>                         one run in detail
   orch cancel <id>                       cancel a parked or stranded run
   orch doctor                            check claude and opencode auth
+  orch help | --help | -h                this message
 `;
 
+const OPTIONS = {
+  project: { type: "string" },
+  help: { type: "boolean", short: "h" },
+} as const;
+
 async function main(argv: string[]): Promise<number> {
-  const { positionals, values } = parseArgs({
-    args: argv,
-    allowPositionals: true,
-    options: { project: { type: "string" } },
-    strict: true,
-  });
+  let parsed: ReturnType<typeof parseArgs<{ options: typeof OPTIONS; allowPositionals: true }>>;
+  try {
+    parsed = parseArgs({ args: argv, allowPositionals: true, options: OPTIONS, strict: true });
+  } catch (err) {
+    // parseArgs throws ERR_PARSE_ARGS_UNKNOWN_OPTION / _INVALID_OPTION_VALUE /
+    // _UNEXPECTED_POSITIONAL. Uncaught, those reached index.ts's bottom handler as a bare message
+    // and exit 2 — "a stage failed" in this CLI's contract — for what is a usage error, and the
+    // text was Node's, not ours: `orch --version` printed "To specify a positional argument
+    // starting with a '-' …" and never showed the usage.
+    if (String((err as NodeJS.ErrnoException).code).startsWith("ERR_PARSE_ARGS_")) {
+      process.stderr.write(`${(err as Error).message}\n\n${USAGE}`);
+      return EXIT.USAGE;
+    }
+    throw err;
+  }
+  const { positionals, values } = parsed;
+
+  // Asking for help is not a usage error, so it prints to stdout and exits 0 — a wrapper running
+  // `orch --help` should not read a failure. Being handed a command we do not recognise still
+  // prints the same text to stderr and exits 64, below.
+  if (values.help) {
+    process.stdout.write(USAGE);
+    return EXIT.OK;
+  }
 
   const [command, arg] = positionals;
   switch (command) {
+    case "help":
+      process.stdout.write(USAGE);
+      return EXIT.OK;
     case "list":
       return commands.list();
     case "show":

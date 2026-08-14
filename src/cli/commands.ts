@@ -6,6 +6,7 @@ import {
   getRun,
   listRuns,
   type Run,
+  type RunStatus,
 } from "../lib/db";
 import { validateProject } from "../lib/git";
 import { isPidAlive } from "../lib/orchestrator/control";
@@ -23,7 +24,7 @@ import {
 import { checkCredentials } from "../lib/preflight";
 import { EXIT, exitCodeForStatus } from "./exit-codes";
 import { notifyRunFinished } from "./notify";
-import { ask, editText } from "./prompt";
+import { StdinNotInteractiveError, ask, editText } from "./prompt";
 import { renderEvent } from "./render";
 
 function fmtCost(n: number | null): string {
@@ -42,8 +43,11 @@ export async function list(): Promise<number> {
   }
   for (const run of runs) {
     const task = run.task.length > 48 ? `${run.task.slice(0, 47)}…` : run.task;
+    // Full id, not the first 8 characters: `getRun` is an exact match and resolves no prefix, so
+    // every id printed short here was one `orch show`/`resume`/`cancel` rejected as "Run not
+    // found". A listing whose output cannot be pasted into the next command is a trap.
     process.stdout.write(
-      `${run.id.slice(0, 8)}  ${run.status.padEnd(20)}  ${run.created_at.slice(0, 16)}  ${task}\n`,
+      `${run.id}  ${run.status.padEnd(20)}  ${run.created_at.slice(0, 16)}  ${task}\n`,
     );
   }
   return EXIT.OK;
@@ -100,25 +104,32 @@ export async function doctor(): Promise<number> {
  * reading a plan and the row keeps a dead `owner_pid` and its worktree under
  * `.orchestrator-worktrees/` with nothing pointing at it. Checking only active statuses let a
  * second pipeline start on top of exactly that.
+ *
+ * Reports *every* unfinished run, not just the newest. Each one has to be cleared with its own
+ * `orch cancel`, and naming them one at a time made that a guessing game: clear the run you were
+ * told about, re-run, get told about the next.
  */
 function assertNoUnfinishedRun(): string | null {
-  const [busy] = findUnfinishedRuns();
-  if (!busy) return null;
-  const short = busy.id.slice(0, 8);
+  const unfinished = findUnfinishedRuns();
+  if (unfinished.length === 0) return null;
+  return unfinished.map(describeUnfinishedRun).join("\n");
+}
+
+function describeUnfinishedRun(busy: Run): string {
   const atGate = GATE_STATUSES.includes(busy.status);
 
   // A live owner is a legitimately busy run, not a stranded one — including at a gate, where the
   // owner is simply sitting at a prompt in another terminal.
   if (isPidAlive(busy.owner_pid)) {
     const where = atGate ? " — answer the prompt in that terminal" : "";
-    return `Run ${short} is already ${busy.status} (pid ${busy.owner_pid})${where}.`;
+    return `Run ${busy.id} is already ${busy.status} (pid ${busy.owner_pid})${where}.`;
   }
 
   // owner_pid dead, or null (a row written before the owner_pid migration): nobody is driving it.
   const remedy = atGate
     ? `Clear it with: orch cancel ${busy.id} — or pick it back up with: orch resume ${busy.id}`
     : `Clear it with: orch cancel ${busy.id}`;
-  return `Run ${short} is stuck at ${busy.status} — its process is gone. ${remedy}`;
+  return `Run ${busy.id} is stuck at ${busy.status} — its process is gone. ${remedy}`;
 }
 
 /**
@@ -147,6 +158,37 @@ function printSummary(run: Run): void {
 }
 
 /**
+ * `ask` at a gate, plus the one failure only the CLI can explain: an input stream that ends
+ * without answering. Returns `null` for that, meaning "stop, with EXIT.USAGE".
+ *
+ * This is the caller half of C1. `orch resume <id> < /dev/null` — or any wrapper running the CLI
+ * without a terminal — used to print the plan, print the prompt, and exit **0**, which is this
+ * CLI's own code for "approved", over a run still parked with its worktree on disk. Nothing was
+ * interrupted, so 130 would be a lie; nothing failed, so 2 would be too. It is a usage error: a
+ * command that asks questions was pointed at a stdin that cannot answer, and the message has to
+ * say so and name both ways out, because the run is untouched and still needs one of them.
+ */
+async function askAtGate(
+  runId: string,
+  status: RunStatus,
+  question: string,
+  choices: string[],
+): Promise<string | null> {
+  try {
+    return await ask(question, choices);
+  } catch (err) {
+    if (!(err instanceof StdinNotInteractiveError)) throw err;
+    process.stderr.write(
+      `\n${err.message}\n` +
+        `Run ${runId} is still parked at ${status} — nothing was changed.\n` +
+        `  orch resume ${runId}   answer it from a terminal\n` +
+        `  orch cancel ${runId}   clear it and remove its worktree\n`,
+    );
+    return null;
+  }
+}
+
+/**
  * Drives a run from wherever it currently is to a terminal state, prompting at each human gate.
  * `track` is handed each pipeline promise so the SIGINT handler can await it rather than race it.
  */
@@ -159,9 +201,10 @@ export async function driveToTerminal(
     if (!run) throw new Error(`Run not found: ${runId}`);
 
     if (run.status === "awaiting_approval") {
-      let planText = run.plan_text ?? "";
-      process.stdout.write(`\n${planText}\n`);
-      const choice = await ask("Approve this plan?", ["a", "e", "r"]);
+      const shownPlan = run.plan_text ?? "";
+      process.stdout.write(`\n${shownPlan}\n`);
+      const choice = await askAtGate(runId, run.status, "Approve this plan?", ["a", "e", "r"]);
+      if (choice === null) return EXIT.USAGE;
       if (choice === "r") {
         try {
           // A status that moved underneath the CLI (another process already answered this gate,
@@ -175,6 +218,17 @@ export async function driveToTerminal(
         }
         continue;
       }
+
+      // Re-read rather than approving the snapshot printed above: the web console can edit the
+      // plan while this prompt sits open, and approveRun persists whatever text it is handed, so
+      // passing the stale copy silently overwrites that edit. Announced rather than swapped in
+      // quietly — otherwise "a" approves text the user was never shown.
+      let planText = getRun(runId)?.plan_text ?? shownPlan;
+      if (planText !== shownPlan) {
+        process.stdout.write("\nThe plan was edited elsewhere while this prompt was open —\n");
+        process.stdout.write(`using the current text:\n\n${planText}\n`);
+      }
+
       if (choice === "e") {
         const edited = await editText(planText);
         if (!edited.ok) {
@@ -194,7 +248,8 @@ export async function driveToTerminal(
 
     if (run.status === "needs_changes") {
       process.stdout.write(`\n${run.review_reasoning ?? "(no reasoning recorded)"}\n`);
-      const choice = await ask("Retry Execute with this feedback?", ["r", "c"]);
+      const choice = await askAtGate(runId, run.status, "Retry Execute with this feedback?", ["r", "c"]);
+      if (choice === null) return EXIT.USAGE;
       try {
         // Both throw for the same reason — a status that moved underneath the CLI (and
         // retryExecute additionally for the retry cap) — so both are caught the same way.

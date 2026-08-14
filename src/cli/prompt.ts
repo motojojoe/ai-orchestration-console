@@ -18,12 +18,30 @@ export interface AskIO {
 }
 
 /**
+ * Thrown by `ask` when the input ends without answering — a piped or redirected stdin at a prompt
+ * that needs a human, or Ctrl-D, which readline routes through the same `close`. Typed rather than
+ * a plain `Error` so callers can tell it from a pipeline failure and map it to a usage exit code;
+ * the caller owns the remedy text, because only it knows which run is parked.
+ */
+export class StdinNotInteractiveError extends Error {
+  constructor() {
+    super("stdin is not interactive — the input ended without an answer.");
+    this.name = "StdinNotInteractiveError";
+  }
+}
+
+/**
  * How long to hold the event loop open after re-raising SIGINT at ourselves — see `defaultAskIO`.
  * Delivery itself takes one turn of the loop, so this is really the budget for the CLI's own
- * handler to finish cancelling and exit. It matches the 30s force-exit that handler already sets
- * for itself (`installSignalHandler` in commands.ts), so this timer never cuts a cancel short that
- * the CLI is still legitimately waiting on. Bounded on purpose: an unbounded hold would turn a
- * stranded run into a hung process.
+ * handler to finish cancelling and exit.
+ *
+ * `installSignalHandler` in commands.ts sets a 30s force-exit of its own, and this timer is *not*
+ * a tie with it, whatever an earlier version of this comment claimed: this one is armed
+ * synchronously, immediately before `process.kill`, whereas that one is armed by the SIGINT
+ * handler at least one loop turn later. Equal durations, earlier start — so at a gate this timer
+ * always fires first, and a cancel still legitimately in flight at the 30s mark is cut short by
+ * this message rather than by the handler's own. Both paths exit 130 either way. Bounded on
+ * purpose: an unbounded hold would turn a stranded run into a hung process.
  */
 const INTERRUPT_HOLD_MS = 30_000;
 
@@ -61,9 +79,41 @@ const INTERRUPT_HOLD_MS = 30_000;
  * If that timer ever expires, the signal was raised but nothing exited on it. Exiting 130 with a
  * message is the honest outcome; falling through to a success code is the regression this
  * replaces.
+ *
+ * **End of input is the other way this prompt can end, and it needs the opposite treatment.**
+ * `orch resume <id> < /dev/null`, or any wrapper that runs the CLI without a terminal, reaches a
+ * gate and readline emits `close` on EOF. `Interface.prototype.close` never settles the pending
+ * `question` (fact 1 above, relied on by the SIGINT path), so before this the promise stayed
+ * pending, nothing was ref'd, Node ended the loop, and the process exited **0** — the same silent
+ * success code over a parked run that the SIGINT work above exists to prevent, and worse here
+ * because 0 is this CLI's "approved". So the pending question is rejected on `close` and the
+ * caller turns that into a usage error.
+ *
+ * The one hazard in doing that is this file's own SIGINT path, which *also* calls `rl.close()`.
+ * Rejecting there would unwind `ask` into the caller's `finally`, tearing down the very SIGINT
+ * handler being re-raised at — exactly the failure fact 1 describes. Hence `interrupting`, set by
+ * a listener registered *ahead* of the SIGINT handler below (EventEmitter runs listeners in
+ * registration order) so it is already true by the time that handler's `rl.close()` emits `close`.
+ * The SIGINT handler itself is untouched.
+ *
+ * `input`/`output` are parameters only so the EOF path has a unit test: `stubAskIO` in
+ * prompt.test.ts cannot express end-of-input, which is why this shipped broken. Production callers
+ * take the defaults and get byte-identical behavior, including readline's `terminal` inference
+ * from `output.isTTY` that puts stdin in raw mode.
  */
-const defaultAskIO = (): AskIO => {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+export const defaultAskIO = (
+  input: NodeJS.ReadableStream = process.stdin,
+  output: NodeJS.WritableStream = process.stdout,
+): AskIO => {
+  const rl = createInterface({ input, output });
+
+  let interrupting = false;
+  let ended = false;
+  let rejectPending: ((err: Error) => void) | null = null;
+
+  rl.once("SIGINT", () => {
+    interrupting = true;
+  });
 
   rl.once("SIGINT", () => {
     rl.close();
@@ -77,7 +127,40 @@ const defaultAskIO = (): AskIO => {
     process.kill(process.pid, "SIGINT");
   });
 
-  return rl;
+  rl.once("close", () => {
+    if (interrupting) return;
+    ended = true;
+    rejectPending?.(new StdinNotInteractiveError());
+  });
+
+  return {
+    question: (prompt) =>
+      new Promise<string>((resolve, reject) => {
+        // Already at EOF before we even asked — the `close` listener has no pending question to
+        // reject, so answer for it rather than handing back a promise nothing will ever settle.
+        if (ended) {
+          reject(new StdinNotInteractiveError());
+          return;
+        }
+        rejectPending = reject;
+        rl.question(prompt).then(
+          (answer) => {
+            rejectPending = null;
+            resolve(answer);
+          },
+          (err: Error) => {
+            rejectPending = null;
+            reject(err);
+          },
+        );
+      }),
+    close: () => {
+      // Cleared first: `ask`'s `finally` calls this on the ordinary path too, and the `close` it
+      // triggers must not reject a question that already resolved.
+      rejectPending = null;
+      rl.close();
+    },
+  };
 };
 
 /**

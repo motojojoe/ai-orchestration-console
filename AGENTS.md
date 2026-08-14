@@ -262,6 +262,15 @@ Four constraints are load-bearing:
   ends the loop and exits **0** before the re-raised signal is ever polled — a silent success code
   over a run left parked with a dead `owner_pid` and its worktree on disk. Both halves cost a
   review round each to establish, under a pty, after confident reasoning that was wrong.
+- **`defaultAskIO` also rejects the pending question on readline `close`, and the `interrupting`
+  flag that suppresses that on the SIGINT path is load-bearing.** End of input — a piped stdin, or
+  Ctrl-D — reaches a gate through the same `close` the SIGINT path triggers with its own
+  `rl.close()`. Rejecting there unwinds `ask` into the caller's `finally` and tears down the SIGINT
+  handler being re-raised at, which is the failure the point above describes; the flag is set by a
+  listener registered *ahead* of the SIGINT handler, so registration order is the mechanism. Without
+  the `close` rejection at all, a gate reached with a non-interactive stdin exited **0** — this
+  CLI's code for "approved" — over a parked run. Any change here has to be re-proved under a pty in
+  both directions, not just typechecked.
 
 Runs record `owner_pid` so `cancelRun` can tell a run stranded by a dead process (close it out)
 from one a different live process is driving (refuse — `finalizeTerminal` deletes worktrees
@@ -280,7 +289,13 @@ run does not have: `setStatus` emits over SSE so browser tabs render the approve
 status stays there across `writePlanFileAndCommit`'s await, so a click landing in that window
 passes the guard and starts a second plan commit.
 
-Known gaps, both recorded rather than fixed: `SPEC.md:17` says one pipeline at a time and nothing
-enforces it — the CLI's check is advisory and the web route has none. And the retry cap is off by
+Known gaps, recorded rather than fixed: `SPEC.md:17` says one pipeline at a time and nothing
+enforces it — the CLI's check is advisory and the web route has none. The retry cap is off by
 one: `retry_count` starts at 0 and `retryExecute` rejects at `>= 3`, allowing four Execute↔Review
-cycles where `SPEC.md:99` says three.
+cycles where `SPEC.md:99` says three. And **a cancel landing in the window before a stage is
+registered still orphans that stage's child process**: `runStage`'s `throwIfCancelled` runs after
+the caller has already spawned the CLI, so the pipeline stops waiting on it but nothing kills it.
+Closing that wants the deferred "a pipeline is in flight in this process" registry in `control.ts`,
+which would replace `cancelRun`'s status ladder with an ownership test — a design change to the
+cancellation model, deliberately not made at the end of a branch that has already spent four review
+rounds on it.
