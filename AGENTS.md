@@ -299,3 +299,16 @@ Closing that wants the deferred "a pipeline is in flight in this process" regist
 which would replace `cancelRun`'s status ladder with an ownership test — a design change to the
 cancellation model, deliberately not made at the end of a branch that has already spent four review
 rounds on it.
+
+Two more, from the final re-review. The `reject` and `close` routes catch **every** error from
+`rejectRun`/`closeRun` as a 409, but only the status-guard throw is a refusal — a `SQLITE_BUSY` from
+`updateRun` (the CLI and dev server share one file on a 5s `busy_timeout`) would reach the browser as
+a conflict carrying a SQLite message. Narrowing it wants a typed refusal, the way
+`RunOwnedElsewhereError` already is, not a message match; `cancel/route.ts` still reports a refusal
+as `{ok:true}` for the separate reason that awaiting `cancelRun` would hold the response through
+`gracefulStop`'s five seconds. And the registration-order invariant in `defaultAskIO` — the
+`interrupting` listener must be registered *ahead* of the SIGINT handler — has **no automated
+guard**: swapping the two `rl.once("SIGINT", …)` blocks typechecks and passes the whole suite while
+silently reintroducing the exit-0-over-a-parked-run failure. `defaultAskIO` does not expose its
+`rl`, so the invariant is not reachable from `prompt.test.ts` without reshaping that file. The
+comments are the mitigation; do not trust the tests here.
