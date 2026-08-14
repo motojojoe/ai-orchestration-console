@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Orchestration Console — a local 3-stage coding pipeline</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --fg: #e6edf3;
+    --muted: #9da7b3;
+    --faint: #6e7681;
+    --accent: #58a6ff;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --danger: #f85149;
+    --pre-bg: #161b22;
+    --pre-border: #30363d;
+    --card: #161b22;
+    --card-border: #2d333b;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: clamp(0.95rem, 1.6vw, 1.15rem);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .deck { height: 100vh; }
+  .slide {
+    display: none;
+    height: 100vh;
+    overflow-y: auto;
+    padding: clamp(1.5rem, 4vh, 3rem) clamp(1.25rem, 6vw, 4rem) clamp(4rem, 10vh, 6rem);
+  }
+  .slide.active { display: block; }
+  .inner {
+    max-width: 62rem;
+    margin: 0 auto;
+  }
+  .kicker {
+    color: var(--accent);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: clamp(0.65rem, 1.1vw, 0.8rem);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    margin: 0 0 0.35em;
+  }
+  h1 {
+    font-size: clamp(1.6rem, 4.2vw, 2.7rem);
+    line-height: 1.15;
+    margin: 0 0 0.5em;
+    letter-spacing: -0.02em;
+  }
+  h2 {
+    font-size: clamp(1.3rem, 3vw, 2rem);
+    line-height: 1.2;
+    margin: 0 0 0.6em;
+    letter-spacing: -0.01em;
+  }
+  h3 {
+    font-size: clamp(1.05rem, 2.2vw, 1.35rem);
+    margin: 1.4em 0 0.4em;
+  }
+  p { margin: 0 0 0.9em; max-width: 70ch; }
+  ul, ol { margin: 0 0 0.9em 1.25em; padding: 0; max-width: 70ch; }
+  li { margin-bottom: 0.35em; }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 0.86em;
+    background: var(--pre-bg);
+    border: 1px solid var(--pre-border);
+    border-radius: 4px;
+    padding: 0.08em 0.35em;
+    color: #ffd9a8;
+  }
+  pre {
+    margin: 0.9em 0 1.1em;
+    padding: 1em 1.2em;
+    background: var(--pre-bg);
+    border: 1px solid var(--pre-border);
+    border-radius: 8px;
+    overflow-x: auto;
+  }
+  pre code {
+    display: block;
+    background: none;
+    border: 0;
+    padding: 0;
+    font-size: clamp(0.68rem, 1.25vw, 0.9rem);
+    line-height: 1.55;
+    color: #c9d1d9;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .why {
+    margin: 1em 0 0;
+    padding: 0.9em 1.1em;
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-left: 3px solid var(--warn);
+    border-radius: 6px;
+  }
+  .why .label {
+    color: var(--warn);
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-size: 0.72em;
+    margin-right: 0.6em;
+  }
+  .why p, .why ul { margin-bottom: 0.4em; }
+  .flow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 0.5rem 0.4rem;
+    margin: 1em 0;
+  }
+  .box {
+    flex: 1 1 auto;
+    min-width: 9rem;
+    text-align: center;
+    padding: 0.7em 0.8em;
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    background: var(--card);
+  }
+  .box .t { font-weight: 700; }
+  .box .s {
+    display: block;
+    color: var(--muted);
+    font-size: 0.78em;
+    margin-top: 0.2em;
+  }
+  .box.plan   { border-color: var(--accent); }
+  .box.exec   { border-color: var(--ok); }
+  .box.review { border-color: var(--warn); }
+  .arrow {
+    align-self: center;
+    color: var(--muted);
+    font-size: 1.2em;
+    padding: 0 0.2em;
+  }
+  .states { margin-top: 1.2em; }
+  .states code { background: transparent; border: 0; padding: 0; color: #ffd9a8; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1em 0;
+    font-size: 0.92em;
+  }
+  th, td {
+    text-align: left;
+    vertical-align: top;
+    padding: 0.55em 0.8em;
+    border-bottom: 1px solid var(--card-border);
+  }
+  th { color: var(--accent); font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.05em; }
+  td code { font-size: 0.82em; white-space: nowrap; }
+  td.cmd code { white-space: normal; word-break: break-word; }
+  .footer {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.9rem;
+    padding: 0.55rem 1.25rem;
+    background: rgba(13, 17, 23, 0.94);
+    border-top: 1px solid var(--card-border);
+    font-size: 0.85rem;
+    color: var(--muted);
+    z-index: 10;
+  }
+  .footer .count {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    color: var(--fg);
+  }
+  .footer .hint { margin-left: auto; text-align: right; }
+  .footer .hint kbd {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    background: var(--pre-bg);
+    border: 1px solid var(--pre-border);
+    border-radius: 3px;
+    padding: 0.05em 0.4em;
+    font-size: 0.8em;
+    color: var(--fg);
+  }
+  .navbtn {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 1rem;
+    line-height: 1;
+    background: var(--pre-bg);
+    color: var(--fg);
+    border: 1px solid var(--pre-border);
+    border-radius: 6px;
+    padding: 0.3em 0.65em;
+    cursor: pointer;
+  }
+  .navbtn:hover { border-color: var(--accent); color: var(--accent); }
+  @media (max-width: 640px) {
+    .footer .hint { display: none; }
+    .slide { padding: 1.2rem 1rem 4rem; }
+  }
+  @media print {
+    body { background: #fff; }
+    :root {
+      --bg: #fff; --fg: #1f2328; --muted: #57606a; --faint: #8c959f;
+      --pre-bg: #f6f8fa; --pre-border: #d0d7de; --card: #f6f8fa; --card-border: #d0d7de;
+      --accent: #0969da; --ok: #1a7f37; --warn: #9a6700;
+    }
+    .deck { height: auto; }
+    .slide { display: block; height: auto; min-height: 0; overflow: visible; page-break-after: always; }
+    .slide.active { display: block; }
+    .footer { display: none; }
+    pre, pre code { page-break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="deck" id="deck">
+
+  <section class="slide active">
+    <div class="inner">
+      <p class="kicker">AI Orchestration Console</p>
+      <h1>A local 3-stage coding pipeline,<br>driven by headless CLIs</h1>
+      <p>One SQLite-backed run, one isolated git worktree, and three stage prompts &mdash; <b>Plan</b> (Claude Code), <b>Execute</b> (OpenCode), <b>Review</b> (Claude Code) &mdash; all invoked through a single NDJSON spawn helper that feeds the prompt over <b>stdin</b> and streams events out.</p>
+      <p class="why"><span class="label">Navigate</span> Arrow keys / Space / n p step. Home and End jump. Click anywhere advances; <code>Shift+click</code> goes back. The footer keeps a live counter and <code>#N</code> syncs to your slide.</p>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="inner">
+      <p class="kicker">At a glance</p>
+      <h2>Three stages, one state machine</h2>
+      <div class="flow">
+        <div class="box plan"><span class="t">Plan</span><span class="s">Claude Code &middot; headless &middot; read-only</span></div>
+        <span class="arrow">&rarr;</span>
+        <div class="box exec"><span class="t">Execute</span><span class="s">OpenCode &middot; free model &middot; writes</span></div>
+        <span class="arrow">&rarr;</span>
+        <div class="box review"><span class="t">Review</span><span class="s">Claude Code &middot; fresh session &middot; read-only</span></div>
+      </div>
+      <p>The run row in SQLite is the single source of truth. Every transition goes through <code>setStatus</code>, which writes the DB <em>and</em> emits an SSE event &mdash; the frontend never holds state the backend does not already have.</p>
+      <p class="states">Status machine: <code>planning</code> &rarr; <code>awaiting_approval</code> &rarr; <code>executing</code> &rarr; <code>reviewing</code> &rarr; <code>approved</code>&nbsp;|&nbsp;<code>needs_changes</code> &rarr; <code>closed_needs_changes</code> &middot; <code>failed</code>/<code>cancelled</code> from any point.</p>
+      <p class="why"><span class="label">Why it matters</span> Because approval is a real gate between Plan and Execute, the plan document gets human eyes before any code is written &mdash; and because Review is a separate fresh process, it judges only what is written down.</p>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="inner">
+      <p class="kicker">src/lib/cli/process.ts &middot; the shared spawn helper</p>
+      <h2>One function feeds a prompt and streams NDJSON</h2>
+      <pre><code>spawnAndStreamNdjson({
+  command,    // "claude" | "opencode"
+  args,       // per-stage flags
+  cwd,        // the run's isolated worktree
+  stdinText,  // the stage prompt
+  onEvent,    // live-forwarded parsed events
+})
+// &rarr; { result: Promise&lt;{ exitCode, events, stderr }&gt;, kill(signal) }</code></pre>
+      <p>The child is spawned with <code>stdio: ["pipe","pipe","pipe"]</code> &mdash; all three streams piped, no TTY anywhere:</p>
+      <pre><code>const child = spawn(opts.command, opts.args, { cwd: opts.cwd, stdio: ["pipe","pipe","pipe"] });
+
+if (opts.stdinText !== undefined) {
+  child.stdin.write(opts.stdinText, "utf-8");
+}
+child.stdin.end();</code></pre>
+      <p>The <code>cwd</code> is always the run&rsquo;s disposable worktree &mdash; a stage process never sees the user&rsquo;s main working directory.</p>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="inner">
+      <p class="kicker">process.ts &middot; the design decision</p>
+      <h2>Why the prompt goes over stdin, not argv</h2>
+      <p>Plans and diffs are <b>unbounded</b>. A large plan, or a multi-megabyte cumulative diff fed to Review, is normal. <code>argv</code> is capped by the OS <code>ARG_MAX</code> (&asymp;128&nbsp;KB on Linux, &asymp;256&nbsp;KB on macOS) &mdash; so passing the prompt as a command-line argument would make large runs fail at spawn time.</p>
+      <ul>
+        <li><code>stdinText</code> is written to <code>child.stdin</code>, then <code>child.stdin.end()</code> closes it &mdash; the CLI reads until EOF and runs once.</li>
+        <li>The prompt travels as a pipe, not a single argv string, so size is bounded only by memory.</li>
+        <li>Both CLIs read their instructions the same way, so the same helper serves all three stages.</li>
+      </ul>
+      <p class="why"><span class="label">The rule</span> <em>Feed the prompt over stdin, never argv</em> &mdash; the pipeline is built on text of unbounded size.</p>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="inner">
+      <p class="kicker">process.ts &middot; stdout parsing</p>
+      <h2>The NDJSON line-buffer loop</h2>
+      <pre><code>const consumeLine = (line: string) =&gt; {
+  if (!line.trim()) return;
+  try {
+    const parsed = JSON.parse(line) as NdjsonEvent;
+    events.push(parsed);
+    opts.onEvent(parsed);
+  } catch {
+    // Non-JSON stdout line (shouldn't happen with --format/--output-format json*); ignore.
+  }
+};
+
+child.stdout.on("data", (chunk: Buffer) =&gt; {
+  buffer += chunk.toString("utf-8");
+  let idx: number;
+  while ((idx = buffer.indexOf("\n")) &gt;= 0) {
+    consumeLine(buffer.slice(0, idx));
+    buffer = buffer.slice(idx + 1);
+  }
+});</code></pre>
+      <p>Output arrives in chunks, so lines are assembled across chunk boundaries. Each complete line is <code>JSON.parse</code>d into an <code>NdjsonEvent</code>; a non-JSON line is <b>silently ignored</b> rather than killing the stage.</p>
+      <p>A trailing partial line (no final newline) is flushed on <code>close</code>:</p>
+      <pre><code>child.on("close", (code) =&gt; {
+  if (buffer.trim()) consumeLine(buffer);  // trailing partial flush
+  resolve({ exitCode: code, events, stderr });
+});</code></pre>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="inner">
+      <p class="kicker">process.ts &middot; stderr and the kill contract</p>
+      <h2>stderr kept apart &middot; SIGTERM first, SIGKILL after</h2>
+      <p>stderr is accumulated separately and never mixed into the NDJSON stream, so stage diagnostics stay available even when stdout is clean:</p>
+      <pre><code>child.stderr.on("data", (chunk: Buffer) =&gt; {
+  stderr += chunk.toString("utf-8");
+});</code></pre>
+      <p>The handle returns <code>{ result, kill }</code>: <code>result</code> resolves on <code>close</code> with <code>{ exitCode, events, stderr }</code>; <code>kill(signal)</code> sends a signal to the live child.</p>
+      <p class="why"><span class="label">Spec &sect;6 contract</span> <code>kill</code> sends <b>SIGTERM first</b>; the caller escalates to <b>SIGKILL</b> after a grace period. OpenCode exits 0 on SIGTERM &mdash; a &ldquo;clean&rdquo; exit in its own eyes &mdash; so cancellation is tracked by an explicit cancelled flag, never inferred from an exit code.</p>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="inner">
+      <p class="kicker">src/lib/orchestrator/prompts.ts &middot; buildPlanPrompt</p>
+      <h2>Plan: a rigid template, filled in</h2>
+      <pre><code>You are the Plan stage of an automated coding pipeline. Research this codebase (you cannot edit any files in this mode) and produce a plan for the following task.
+
+Task: ${task}
+
+Reply with ONLY the plan document below, filled in &mdash; no preamble, no commentary before or after it:
+
+# &lt;short task title&gt;
+
+## Objective
+&lt;one-line goal&gt;
+
+## Context
+&lt;relevant background/constraints found in the codebase&gt;
+
+## Steps
+1. ...
+2. ...
+
+## Acceptance criteria
+- &lt;conditions that define "done"&gt;
+
+## Out of scope
+- &lt;things this run must NOT touch&gt;</code></pre>
+      <p class="why"><span class="label">Why it&rsquo;s worded this way</span> The fixed skeleton makes the reply <b>machine-parsable</b> &mdash; the backend extracts the final <code>result</code> event text verbatim &mdash; <em>and</em> <b>human-approvable</b>: the approval gate shows exactly one Objective, one Context, one Step list, one Acceptance-criteria list, one Out-of-scope list. &ldquo;No preamble, no commentary&rdquo; guarantees nothing precedes the document.</p>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="inner">
+      <p class="kicker">prompts.ts &middot; buildExecutePrompt</p>
+      <h2>Execute: the plan, as-is &mdash; and the retry branch</h2>
+      <pre><code>Implement the following plan exactly as written. Do not go beyond its "Out of scope" section.
+
+${planText}</code></pre>
+      <p>With reviewer feedback from a rejected attempt, the prompt becomes:</p>
+      <pre><code>Implement the following plan exactly as written. Do not go beyond its "Out of scope" section.
+
+${planText}
+
+A reviewer already looked at your previous attempt and found issues. Address this feedback:
+
+${retryFeedback}</code></pre>
+      <p class="why"><span class="label">Why it&rsquo;s worded this way</span> <em>&ldquo;Do not go beyond its Out of scope section&rdquo;</em> bounds Execute&rsquo;s autonomy &mdash; the plan&rsquo;s contents are passed <b>as-is</b> (<code>buildExecutePrompt(planText, retryFeedback?)</code>). On retry the reviewer&rsquo;s feedback is appended <b>verbatim</b> &mdash; Execute never re-derives it from the diff, and can&rsquo;t miss it.</p>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="inner">
+      <p class="kicker">prompts.ts &middot; buildReviewPrompt</p>
+      <h2>Review: judge only what is written below</h2>
+      <pre><code>You are the Review stage of an automated coding pipeline. You were not part of the planning discussion &mdash; judge only what is written below.
+
+Here is the plan that was approved:
+
+${planText}
+
+Here is the git diff of the changes that were made:
+
+${diffText || "(no changes were made)"}
+
+Check the diff against the plan's "Acceptance criteria" section. Reply with your verdict as the very first line, exactly one of:
+
+VERDICT: APPROVE
+VERDICT: NEEDS_CHANGES
+
+Then give your reasoning on the following lines.</code></pre>
+      <p class="why"><span class="label">Why it&rsquo;s worded this way</span> Review must not re-litigate the discussion it never saw &mdash; it is told explicitly it was <em>not part</em> of it. The plan and the diff are placed <b>inline in the prompt</b>, so Review checks what is actually written rather than exploring on its own. An empty diff renders as <code>(no changes were made)</code>, and the verdict must be the <b>very first line</b> &mdash; that is what makes it machine-parseable.</p>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="inner">
+      <p class="kicker">Plan stage &middot; src/lib/cli/claude.ts</p>
+      <h2>Plan cannot write files &mdash; so the backend does</h2>
+      <pre><code>const args = ["--print", "--output-format", "stream-json", "--verbose"];
+if (opts.mode === "plan") {
+  args.push("--permission-mode", "plan");
+} else {
+  args.push("--allowedTools", "Read Grep Glob");
+}</code></pre>
+      <p>Plan runs with <code>--permission-mode plan</code>: <b>Claude Code itself refuses any file write in this mode</b>. That is enforced by Claude Code, not by an allowlist the stage could bypass &mdash; Plan is genuinely read-only by construction.</p>
+      <p>Because Claude cannot write the plan file, the <b>backend</b> captures the final <code>type:"result"</code> event&rsquo;s text and writes it itself: <code>writePlanFileAndCommit(worktree, finalPlanText)</code> in <code>pipeline.ts</code> (&asymp;:203). The commit becomes the <b>first commit on the run branch</b>, so the plan travels with the diff Review later checks against it.</p>
+      <p class="why"><span class="label">Why this shape</span> Researching is inherently file-heavy, but the plan is a single deliverable. Enforce read-only in Claude Code, extract the one artifact over NDJSON, and let the pipeline (not the model) own writing and committing it.</p>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="inner">
+      <p class="kicker">Review stage &middot; claude.ts</p>
+      <h2>Fresh, read-only, verdict-first &mdash; fail closed</h2>
+      <pre><code>args.push("--allowedTools", "Read Grep Glob");</code></pre>
+      <ul>
+        <li><b>Fresh session</b> &mdash; Review never resumes Plan&rsquo;s session, so it carries no reasoning it was told not to rely on.</li>
+        <li><b>Read-only</b> &mdash; <code>--allowedTools "Read Grep Glob"</code>: no Edit, no Write, no Bash. Review can inspect but never mutate.</li>
+        <li><b>Fed, not exploratory</b> &mdash; the plan text and the diff are in the prompt, not discovered by wandering the repo.</li>
+      </ul>
+      <pre><code>export function parseVerdict(resultText: string) {
+  const match = resultText.match(/^\s*VERDICT:\s*(APPROVE|NEEDS_CHANGES)\s*\n?([\s\S]*)$/);
+  if (!match) {
+    // Defensive default &mdash; treat an unparseable reply as needing a human look, never a silent pass.
+    return { verdict: "NEEDS_CHANGES", reasoning: `Review reply had no parseable VERDICT line:\n\n${resultText}` };
+  }
+  return { verdict: match[1], reasoning: (match[2] ?? "").trim() };
+}</code></pre>
+      <p class="why"><span class="label">Why fail-closed</span> The regex anchors the verdict to the very first line. Anything unparseable &mdash; a truncated reply, a wrong token, a model tantrum &mdash; defaults to <b>NEEDS_CHANGES</b>, never a silent pass. A broken Review can only slow the pipeline down, not approve garbage.</p>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="inner">
+      <p class="kicker">Execute stage &middot; src/lib/cli/opencode.ts</p>
+      <h2>Execute: skip-permissions, or hang to timeout</h2>
+      <pre><code>const args = [
+  "run",
+  "--format",
+  "json",
+  "--model",
+  opts.model,
+  "--dir",
+  opts.cwd,
+  "--dangerously-skip-permissions",
+];</code></pre>
+      <p><code>--dangerously-skip-permissions</code> is required, not optional: OpenCode&rsquo;s default tool-permission flow expects an <b>interactive prompt</b>, and this process has <b>no TTY</b> to answer one. Without the flag, every Execute run would hang until the stage timeout killed it.</p>
+      <ul>
+        <li>The blast radius is bounded: <code>--dir</code> points at the run&rsquo;s <b>disposable worktree</b>, never the user&rsquo;s main directory.</li>
+        <li>OpenCode reports its own failures as an NDJSON <code>{"type":"error"}</code> event <b>on stdout</b> &mdash; stderr is empty on those failures. <code>describeOpenCodeError</code> prefers that event&rsquo;s detail.</li>
+        <li>Text is assembled from <code>type:"text"</code> parts; tokens and cost are summed across <code>step_finish</code> parts.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="inner">
+      <p class="kicker">Three invocations, one spawn helper</p>
+      <h2>The flags, side by side</h2>
+      <table>
+        <tr><th>Stage</th><th>CLI</th><th>Arguments</th></tr>
+        <tr><td>Plan</td><td class="cmd"><code>claude</code></td><td class="cmd"><code>--print --output-format stream-json --verbose --permission-mode plan</code></td></tr>
+        <tr><td>Review</td><td class="cmd"><code>claude</code></td><td class="cmd"><code>--print --output-format stream-json --verbose --allowedTools "Read Grep Glob"</code></td></tr>
+        <tr><td>Execute</td><td class="cmd"><code>opencode</code></td><td class="cmd"><code>run --format json --model &lt;id&gt; --dir &lt;path&gt; --dangerously-skip-permissions</code></td></tr>
+        <tr><td>All</td><td class="cmd">&mdash;</td><td class="cmd"><code>spawnAndStreamNdjson</code> &mdash; prompt over stdin, NDJSON parsed, stderr apart, <code>{ result, kill }</code></td></tr>
+      </table>
+      <p>Three stage shapes, one input path, one output protocol. The per-stage knowledge lives entirely in the <code>args</code> array each wrapper builds &mdash; the parsing contract never changes.</p>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="inner">
+      <p class="kicker">Isolation &middot; src/lib/git.ts</p>
+      <h2>Every run gets its own worktree</h2>
+      <p><code>createRunWorktree</code> gives each run an isolated <b>git worktree</b>, never an in-place branch checkout &mdash; the pipeline can&rsquo;t disturb whatever the user has open in an editor.</p>
+      <ul>
+        <li><code>computeDiff</code> runs <code>git add -A</code> before diffing &mdash; plain <code>git diff</code> silently omits brand-new untracked files, so a file Execute created from scratch would otherwise be invisible to Review.</li>
+        <li><code>computeDiff</code> always diffs against <code>plan_commit_sha</code>, never a moving <code>HEAD</code> &mdash; a retry&rsquo;s diff shows the full cumulative change Review must check, not just the latest incremental edit.</li>
+        <li><code>commitExecuteChanges</code> runs before any terminal state: <code>removeRunWorktree</code> deletes the worktree directory outright, so uncommitted Execute edits would be gone, not hidden.</li>
+        <li><b>No auto-merge, ever</b> &mdash; a reviewed branch is left for the user to merge through their own git workflow.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="inner">
+      <p class="kicker">History &middot; src/lib/db.ts</p>
+      <h2>SQLite, via the Node built-in</h2>
+      <p>The data layer uses Node&rsquo;s built-in <code>node:sqlite</code> (<code>DatabaseSync</code>) &mdash; the native <code>better-sqlite3</code> module failed to compile against this machine&rsquo;s Node version, and the built-in avoids native compilation entirely.</p>
+      <ul>
+        <li>Schema changes go through <code>addColumnIfMissing</code> &mdash; a minimal <code>ALTER TABLE</code> migration &mdash; rather than dropping and recreating the table, because real run history must survive schema changes.</li>
+        <li>One DB file is shared by the web server and the <code>orch</code> CLI (5s <code>busy_timeout</code>), with the run row as the single source of truth.</li>
+        <li>Configure via <code>ORCHESTRATOR_DB_PATH</code>, defaulting to <code>~/.orchestrator/history.db</code>.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="inner">
+      <p class="kicker">Streaming &middot; events.ts &middot; control.ts</p>
+      <h2>SSE, and the globalThis requirement</h2>
+      <p><code>setStatus</code> writes the DB row and then emits an SSE event; the frontend re-fetches the run over plain HTTP whenever a <code>status_change</code> arrives, and live logs are forwarded <code>cli_event</code> payloads.</p>
+      <p>Both <code>events.ts</code> (in-memory pub-sub) and <code>control.ts</code> (live child-process tracking) stash their module state on <code>globalThis</code> &mdash; not in a plain module-level variable.</p>
+      <p class="why"><span class="label">Why globalThis</span> Next.js dev-mode hot-reload can re-evaluate a file&rsquo;s top level independently per route, so the route that starts a run and the route that later subscribes to its SSE stream don&rsquo;t reliably share the same module instance. A plain <code>const emitters = new Map()</code> silently fragments into separate Maps that never see each other&rsquo;s writes. Any new run-scoped in-memory state needs the same stashing pattern.</p>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="inner">
+      <p class="kicker">Control &middot; src/lib/orchestrator/pipeline.ts</p>
+      <h2>The approval gate and the retry loop</h2>
+      <ul>
+        <li><b>Gate</b>: after Plan, the run parks at <code>awaiting_approval</code>. <code>approveRun</code> is the status guard and nothing else; the work lives in module-private <code>approvePlan</code>. The auto-approve chain in <code>startRun</code> calls <code>approvePlan</code> directly &mdash; parking at the gate first would publish an approve button the run doesn&rsquo;t have.</li>
+        <li><b>Retry loop</b>: <code>needs_changes</code> &rarr; <code>retryExecute</code> &rarr; <code>executing</code> &rarr; <code>reviewing</code>. The reviewer&rsquo;s feedback is passed verbatim into the next Execute prompt.</li>
+        <li><b>Ownership</b>: each run records <code>owner_pid</code>, so <code>cancelRun</code> can tell a run stranded by a dead process (close it out) from one a live process drives (refuse &mdash; finalizing deletes worktrees, and doing that under someone else&rsquo;s Execute destroys uncommitted work).</li>
+        <li><b>No double-execute</b>: <code>approveRun</code>, <code>rejectRun</code>, <code>retryExecute</code> and <code>closeRun</code> each refuse a run whose status has moved, so two processes at one gate cannot start two Execute stages on one worktree.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="inner">
+      <p class="kicker">The CLI &middot; src/cli/</p>
+      <h2>orch: a second consumer, not a reimplementation</h2>
+      <p>The <code>orch</code> CLI runs the exact same <code>pipeline.ts</code> state machine &mdash; every status transition still goes through the shared code, so the two interfaces cannot drift.</p>
+      <ul>
+        <li>It runs the pipeline in the foreground in <b>one process</b>, so it subscribes to <code>subscribeRunEvents</code> directly instead of over SSE.</li>
+        <li>Ctrl-C awaits the outstanding pipeline promise before exiting &mdash; exiting the moment <code>cancelRun</code> returns could beat the <code>cancelled</code> status write and the worktree removal.</li>
+        <li>The same DB, the same worktree mechanics, the same three prompts &mdash; just a different front door.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="inner">
+      <p class="kicker">Recorded, not fixed</p>
+      <h2>Known gaps</h2>
+      <ul>
+        <li><b>One pipeline at a time is not enforced</b>: <code>SPEC.md:17</code> says it, but the CLI&rsquo;s check is advisory and the web route has none.</li>
+        <li><b>Retry cap is off by one</b>: <code>retry_count</code> starts at 0 and <code>retryExecute</code> rejects at <code>&gt;= 3</code>, allowing four Execute&harr;Review cycles where <code>SPEC.md:99</code> says three.</li>
+        <li><b>Cancellation window</b>: a cancel landing in the window before a stage is registered still orphans that stage&rsquo;s child process.</li>
+        <li><b>Error typing</b>: the reject/close routes catch every error from <code>rejectRun</code>/<code>closeRun</code> as a 409 &mdash; only the status-guard throw is a refusal.</li>
+      </ul>
+      <p>These are deliberate trade-offs at branch end, documented rather than swept under the rug.</p>
+    </div>
+  </section>
+
+  <section class="slide">
+    <div class="inner">
+      <p class="kicker">The shape of the system</p>
+      <h2>Everything reduces to a few invariants</h2>
+      <ul>
+        <li><b>Every stage is a headless CLI over a pipe</b> &mdash; prompt on stdin, NDJSON on stdout, stderr kept apart, <code>{ result, kill }</code> out.</li>
+        <li><b>Every transition is a DB row + an SSE event</b> &mdash; the SQLite row is the truth; the UI just reflects it.</li>
+        <li><b>Every run is an isolated worktree</b> &mdash; blast radius bounded, nothing leaks into the user&rsquo;s checkout, nothing auto-merges.</li>
+        <li><b>Failure closes toward a human</b> &mdash; unparseable verdicts become NEEDS_CHANGES; stranded runs can be closed out; gates refuse moved statuses.</li>
+      </ul>
+      <p class="why"><span class="label">Sources</span> SPEC.md &sect;3.1&ndash;&sect;3.4 and the code at <code>src/lib/cli/process.ts</code>, <code>src/lib/cli/claude.ts</code>, <code>src/lib/cli/opencode.ts</code>, <code>src/lib/orchestrator/prompts.ts</code>, <code>src/lib/orchestrator/pipeline.ts</code>, <code>src/lib/git.ts</code>, <code>src/lib/db.ts</code>, <code>src/lib/orchestrator/events.ts</code>, <code>src/lib/orchestrator/control.ts</code>.</p>
+    </div>
+  </section>
+
+</div>
+
+<footer class="footer">
+  <button class="navbtn" id="prevBtn" title="Previous (Shift+Click / ArrowLeft / p)">&lang;</button>
+  <span class="count" id="counter">1 / 20</span>
+  <button class="navbtn" id="nextBtn" title="Next (Click / ArrowRight / Space / n)">&rang;</button>
+  <span class="hint"><kbd>&larr;</kbd> <kbd>&rarr;</kbd> <kbd>Space</kbd> <kbd>n</kbd> <kbd>p</kbd> step &middot; <kbd>Home</kbd> <kbd>End</kbd> jump &middot; click advance &middot; <kbd>Shift+click</kbd> back &middot; <code>#N</code> linkable</span>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+  var slides = Array.prototype.slice.call(document.querySelectorAll(".slide"));
+  var total = slides.length;
+  var counter = document.getElementById("counter");
+  var deck = document.getElementById("deck");
+  var prevBtn = document.getElementById("prevBtn");
+  var nextBtn = document.getElementById("nextBtn");
+
+  function clampIndex(i) {
+    return Math.max(0, Math.min(total - 1, i));
+  }
+  function indexFromHash() {
+    var m = /^#(\d+)$/.exec(location.hash);
+    return m ? parseInt(m[1], 10) - 1 : 0;
+  }
+  function show(i) {
+    var target = clampIndex(i);
+    for (var k = 0; k < total; k++) {
+      slides[k].classList.toggle("active", k === target);
+    }
+    counter.textContent = (target + 1) + " / " + total;
+    if (indexFromHash() !== target) {
+      history.replaceState(null, "", "#" + (target + 1));
+    }
+  }
+  function next() { show(indexFromHash() + 1); }
+  function prev() { show(indexFromHash() - 1); }
+
+  show(indexFromHash());
+
+  document.addEventListener("keydown", function (e) {
+    if (e.ctrlKey || e.altKey || e.metaKey) return;
+    switch (e.key) {
+      case "ArrowRight":
+      case " ":
+      case "PageDown":
+      case "n":
+        e.preventDefault();
+        next();
+        break;
+      case "ArrowLeft":
+      case "PageUp":
+      case "p":
+        e.preventDefault();
+        prev();
+        break;
+      case "Home":
+        e.preventDefault();
+        show(0);
+        break;
+      case "End":
+        e.preventDefault();
+        show(total - 1);
+        break;
+    }
+  });
+
+  deck.addEventListener("click", function (e) {
+    if (e.target.closest && e.target.closest("button")) return;
+    if (e.shiftKey) { prev(); return; }
+    next();
+  });
+
+  prevBtn.addEventListener("click", function (e) {
+    e.stopPropagation();
+    prev();
+  });
+  nextBtn.addEventListener("click", function (e) {
+    e.stopPropagation();
+    next();
+  });
+
+  window.addEventListener("hashchange", function () {
+    show(indexFromHash());
+  });
+})();
+</script>
+</body>
+</html>
