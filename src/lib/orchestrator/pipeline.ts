@@ -257,12 +257,16 @@ export class RunOwnedElsewhereError extends Error {}
 /**
  * Spec §8: graceful SIGTERM/SIGKILL if a stage is mid-flight here, otherwise close the run out.
  *
- * The three cases are genuinely different. A stage live in *this* process can be signalled, and
+ * The four cases are genuinely different. A stage live in *this* process can be signalled, and
  * the owning promise will reach failRun on its own. A run whose owner is a different live process
  * must be refused — finalizeTerminal deletes worktrees outright, and doing that under someone
- * else's running Execute destroys uncommitted work. Everything else (parked, or stranded by a
- * dead owner) is ours to close out; before this, the early return below left stranded runs stuck
- * in an active status with their worktree on disk forever.
+ * else's running Execute destroys uncommitted work. A run we own with no stage currently
+ * registered is still mid-flight *in this process* (between two stages, e.g. inside computeDiff /
+ * commitExecuteChanges) — finalizeTerminal must not touch it either, for the same worktree-deletion
+ * reason, so it's flagged and left for the pipeline's own throwIfCancelled/runStage to convert.
+ * Everything else (parked, or stranded by a dead owner) is ours to close out; before this, the
+ * early return below left stranded runs stuck in an active status with their worktree on disk
+ * forever.
  */
 export async function cancelRun(runId: string): Promise<void> {
   const run = getRun(runId);
@@ -285,9 +289,21 @@ export async function cancelRun(runId: string): Promise<void> {
           `Press Ctrl-C in that terminal to cancel it.`,
       );
     }
+    // We own this run and a pipeline is still driving it here, just between stages. Flag it and
+    // let throwIfCancelled/runStage convert it to "cancelled" once the in-flight git work
+    // finishes: finalizeTerminal would delete the worktree out from under that git command, and
+    // clearController would erase the very flag the pipeline is about to check.
+    if (run.owner_pid === process.pid) {
+      markCancelled(runId);
+      return;
+    }
   }
 
-  markCancelled(runId);
   setStatus(runId, "cancelled");
   await finalizeTerminal(getRun(runId)!);
+  // Set after finalizeTerminal, not before: finalizeTerminal -> clearController deletes this same
+  // flag from the cancelledRuns set, so setting it first would just have it erased. A stranded run
+  // (including a pre-owner_pid-migration row, where owner_pid is null and not "===" to anything)
+  // still needs to end up flagged cancelled for any late-arriving isCancelled() check.
+  markCancelled(runId);
 }

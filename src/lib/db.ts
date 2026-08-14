@@ -23,7 +23,11 @@ export interface Run {
   status: RunStatus;
   branch_name: string;
   worktree_path: string | null;
-  /** PID of the process currently driving this run; null when parked or finished. */
+  /**
+   * PID of the process currently driving this run; null once finished. A run parked at
+   * awaiting_approval or needs_changes deliberately keeps its owner_pid — approveRun/retryExecute
+   * transfer it to whichever process resumes the run, rather than clearing it.
+   */
   owner_pid: number | null;
   auto_approve: 0 | 1;
   plan_commit_sha: string | null;
