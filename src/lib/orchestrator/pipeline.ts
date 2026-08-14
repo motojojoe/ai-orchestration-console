@@ -8,13 +8,15 @@ import {
   removeRunWorktree,
   writePlanFileAndCommit,
 } from "../git";
-import { createRun, getRun, type Run, type RunStatus, updateRun } from "../db";
+import { ACTIVE_STATUSES, createRun, getRun, type Run, type RunStatus, updateRun } from "../db";
 import {
   RunCancelledError,
   StageTimeoutError,
   clearController,
   gracefulStop,
+  hasLiveStage,
   isCancelled,
+  isPidAlive,
   markCancelled,
   runStage,
   throwIfCancelled,
@@ -41,6 +43,7 @@ async function finalizeTerminal(run: Run): Promise<void> {
     }
     updateRun(run.id, { worktree_path: null });
   }
+  updateRun(run.id, { owner_pid: null });
   clearController(run.id);
 }
 
@@ -82,7 +85,7 @@ export async function startRun(runId: string): Promise<void> {
 
   try {
     const { worktreePath } = await createRunWorktree(run.project_path, run.id);
-    updateRun(run.id, { worktree_path: worktreePath });
+    updateRun(run.id, { worktree_path: worktreePath, owner_pid: process.pid });
 
     const handle = runClaude({
       cwd: worktreePath,
@@ -129,7 +132,19 @@ export async function approveRun(runId: string, finalPlanText: string): Promise<
     return;
   }
 
-  const planCommitSha = await writePlanFileAndCommit(run.worktree_path, finalPlanText);
+  // Whoever approves now drives the run — the CLI may be resuming one the web app started.
+  updateRun(runId, { owner_pid: process.pid });
+
+  // writePlanFileAndCommit throws on any git failure (git.ts runGit). Without this catch the
+  // error escapes approveRun entirely, bypasses failRun, and leaves the run at
+  // awaiting_approval with a live worktree and nothing recorded anywhere.
+  let planCommitSha: string;
+  try {
+    planCommitSha = await writePlanFileAndCommit(run.worktree_path, finalPlanText);
+  } catch (err) {
+    await failRun(runId, "plan", err);
+    return;
+  }
   updateRun(runId, { plan_text: finalPlanText, plan_commit_sha: planCommitSha });
   await runExecuteAndReview(runId, finalPlanText, undefined);
 }
@@ -215,7 +230,7 @@ export async function retryExecute(runId: string): Promise<void> {
     throw new Error(`Run ${runId} has reached the retry cap (${RETRY_CAP}) — edit the plan or close it manually.`);
   }
 
-  updateRun(runId, { retry_count: run.retry_count + 1 });
+  updateRun(runId, { retry_count: run.retry_count + 1, owner_pid: process.pid });
   await runExecuteAndReview(runId, run.plan_text ?? "", run.review_reasoning ?? undefined);
 }
 
@@ -236,21 +251,43 @@ export async function closeRun(runId: string): Promise<void> {
   await finalizeTerminal(getRun(runId)!);
 }
 
-/** Spec §8: cancel — graceful SIGTERM/SIGKILL if a stage is mid-flight, otherwise just close it out. */
+/** A run another live process is driving. Only that process can stop its child cleanly. */
+export class RunOwnedElsewhereError extends Error {}
+
+/**
+ * Spec §8: graceful SIGTERM/SIGKILL if a stage is mid-flight here, otherwise close the run out.
+ *
+ * The three cases are genuinely different. A stage live in *this* process can be signalled, and
+ * the owning promise will reach failRun on its own. A run whose owner is a different live process
+ * must be refused — finalizeTerminal deletes worktrees outright, and doing that under someone
+ * else's running Execute destroys uncommitted work. Everything else (parked, or stranded by a
+ * dead owner) is ours to close out; before this, the early return below left stranded runs stuck
+ * in an active status with their worktree on disk forever.
+ */
 export async function cancelRun(runId: string): Promise<void> {
   const run = getRun(runId);
   if (!run) throw new Error(`Run not found: ${runId}`);
   if (TERMINAL_STATUSES.includes(run.status)) return;
 
-  markCancelled(runId);
-
-  if (run.status === "planning" || run.status === "executing" || run.status === "reviewing") {
-    // The in-flight stage's promise rejects once the process exits; failRun() sees isCancelled()
-    // and records status "cancelled" instead of "failed".
-    await gracefulStop(runId);
-    return;
+  if (ACTIVE_STATUSES.includes(run.status)) {
+    if (hasLiveStage(runId)) {
+      markCancelled(runId);
+      // The in-flight stage's promise rejects once the process exits; failRun() sees
+      // isCancelled() and records "cancelled" instead of "failed".
+      await gracefulStop(runId);
+      return;
+    }
+    // Our own pid is not "somewhere else" — this is the Ctrl-C path landing in the gap between
+    // two stages, where no controller is registered but we are still the owner.
+    if (run.owner_pid !== process.pid && isPidAlive(run.owner_pid)) {
+      throw new RunOwnedElsewhereError(
+        `Run ${runId} is being driven by another process (pid ${run.owner_pid}). ` +
+          `Press Ctrl-C in that terminal to cancel it.`,
+      );
+    }
   }
 
+  markCancelled(runId);
   setStatus(runId, "cancelled");
   await finalizeTerminal(getRun(runId)!);
 }
