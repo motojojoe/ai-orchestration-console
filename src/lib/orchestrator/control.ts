@@ -94,3 +94,28 @@ export async function runStage<T>(
     controller.kill = null;
   }
 }
+
+/**
+ * Whether a stage of this run is in flight *in this process*. `gracefulStop` returns silently
+ * when nothing is registered, which reads identically to having stopped something — callers that
+ * need to tell those apart (cancel, above all) must ask this first.
+ */
+export function hasLiveStage(runId: string): boolean {
+  return controllers.get(runId)?.kill != null;
+}
+
+/**
+ * Whether a process id still exists. Signal 0 performs the permission and existence checks
+ * without delivering a signal; EPERM means it exists but is owned by someone else, which for our
+ * purposes is alive. PID reuse could in principle make a dead owner look alive — for a
+ * single-user local tool the consequence is a refusal the user can work around, not data loss.
+ */
+export function isPidAlive(pid: number | null): boolean {
+  if (pid == null) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
