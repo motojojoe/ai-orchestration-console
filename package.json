@@ -13,7 +13,7 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test src/lib/db.test.ts src/lib/orchestrator/control.test.ts src/cli/exit-codes.test.ts src/cli/render.test.ts",
+    "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test src/lib/db.test.ts src/lib/orchestrator/control.test.ts src/cli/exit-codes.test.ts src/cli/render.test.ts src/cli/prompt.test.ts",
     "build:cli": "esbuild src/cli/index.ts --bundle --platform=node --format=cjs --target=node22 --outfile=bin/orch.js --banner:js='#!/usr/bin/env -S node --no-warnings'",
     "prepare": "husky"
   },
