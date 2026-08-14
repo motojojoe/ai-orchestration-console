@@ -5,6 +5,15 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * Where run worktrees live, relative to the project root. One constant because two call sites have
+ * to agree: `createRunWorktree` builds the path, and `validateProject` excludes it from the
+ * clean-tree check. A rename that updated only one would silently make every project with a live
+ * or stranded run look dirty again, refusing both the CLI and `POST /api/runs` with advice
+ * ("commit or stash them") that is wrong for the orchestrator's own bookkeeping.
+ */
+const WORKTREE_DIR = ".orchestrator-worktrees";
+
 async function runGit(args: string[], cwd: string): Promise<{ stdout: string; stderr: string }> {
   try {
     return await execFileAsync("git", args, { cwd, maxBuffer: 1024 * 1024 * 64 });
@@ -47,7 +56,7 @@ export async function validateProject(projectPath: string): Promise<ValidationRe
   // whole tree rather than only the current directory — verified against git 2.54 with a live run
   // worktree present: excluded clean, and a genuinely modified/untracked file still reported.
   const { stdout: status } = await runGit(
-    ["status", "--porcelain", "--", ":(exclude).orchestrator-worktrees"],
+    ["status", "--porcelain", "--", `:(exclude)${WORKTREE_DIR}`],
     projectPath,
   );
   if (status.trim().length > 0) {
@@ -68,7 +77,7 @@ export interface RunWorktree {
 /** Spec §5: dedicated git worktree per run, branch `orchestrator/<run-id>`. */
 export async function createRunWorktree(projectPath: string, runId: string): Promise<RunWorktree> {
   const branchName = `orchestrator/${runId}`;
-  const worktreePath = join(projectPath, ".orchestrator-worktrees", `run-${runId}`);
+  const worktreePath = join(projectPath, WORKTREE_DIR, `run-${runId}`);
   const parent = dirname(worktreePath);
   if (!existsSync(parent)) mkdirSync(parent, { recursive: true });
 
