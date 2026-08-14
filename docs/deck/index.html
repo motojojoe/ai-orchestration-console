@@ -253,7 +253,7 @@
     <div class="inner">
       <p class="kicker">src/lib/cli/process.ts &middot; the shared spawn helper</p>
       <h2>One function feeds a prompt and streams NDJSON</h2>
-      <pre><code>spawnAndStreamNdjson({
+      <pre data-illustrative><code>spawnAndStreamNdjson({
   command,    // "claude" | "opencode"
   args,       // per-stage flags
   cwd,        // the run's isolated worktree
@@ -261,8 +261,8 @@
   onEvent,    // live-forwarded parsed events
 })
 // &rarr; { result: Promise&lt;{ exitCode, events, stderr }&gt;, kill(signal) }</code></pre>
-      <p>The child is spawned with <code>stdio: ["pipe","pipe","pipe"]</code> &mdash; all three streams piped, no TTY anywhere:</p>
-      <pre><code>const child = spawn(opts.command, opts.args, { cwd: opts.cwd, stdio: ["pipe","pipe","pipe"] });
+      <p>The child is spawned with <code>stdio: ["pipe", "pipe", "pipe"]</code> &mdash; all three streams piped, no TTY anywhere:</p>
+      <pre data-src="src/lib/cli/process.ts" data-quote="lines"><code>const child = spawn(opts.command, opts.args, { cwd: opts.cwd, stdio: ["pipe", "pipe", "pipe"] });
 
 if (opts.stdinText !== undefined) {
   child.stdin.write(opts.stdinText, "utf-8");
@@ -290,7 +290,7 @@ child.stdin.end();</code></pre>
     <div class="inner">
       <p class="kicker">process.ts &middot; stdout parsing</p>
       <h2>The NDJSON line-buffer loop</h2>
-      <pre><code>const consumeLine = (line: string) =&gt; {
+      <pre data-src="src/lib/cli/process.ts"><code>const consumeLine = (line: string) =&gt; {
   if (!line.trim()) return;
   try {
     const parsed = JSON.parse(line) as NdjsonEvent;
@@ -311,8 +311,8 @@ child.stdout.on("data", (chunk: Buffer) =&gt; {
 });</code></pre>
       <p>Output arrives in chunks, so lines are assembled across chunk boundaries. Each complete line is <code>JSON.parse</code>d into an <code>NdjsonEvent</code>; a non-JSON line is <b>silently ignored</b> rather than killing the stage.</p>
       <p>A trailing partial line (no final newline) is flushed on <code>close</code>:</p>
-      <pre><code>child.on("close", (code) =&gt; {
-  if (buffer.trim()) consumeLine(buffer);  // trailing partial flush
+      <pre data-src="src/lib/cli/process.ts"><code>child.on("close", (code) =&gt; {
+  if (buffer.trim()) consumeLine(buffer);
   resolve({ exitCode: code, events, stderr });
 });</code></pre>
     </div>
@@ -323,7 +323,7 @@ child.stdout.on("data", (chunk: Buffer) =&gt; {
       <p class="kicker">process.ts &middot; stderr and the kill contract</p>
       <h2>stderr kept apart &middot; SIGTERM first, SIGKILL after</h2>
       <p>stderr is accumulated separately and never mixed into the NDJSON stream, so stage diagnostics stay available even when stdout is clean:</p>
-      <pre><code>child.stderr.on("data", (chunk: Buffer) =&gt; {
+      <pre data-src="src/lib/cli/process.ts"><code>child.stderr.on("data", (chunk: Buffer) =&gt; {
   stderr += chunk.toString("utf-8");
 });</code></pre>
       <p>The handle returns <code>{ result, kill }</code>: <code>result</code> resolves on <code>close</code> with <code>{ exitCode, events, stderr }</code>; <code>kill(signal)</code> sends a signal to the live child.</p>
@@ -335,7 +335,7 @@ child.stdout.on("data", (chunk: Buffer) =&gt; {
     <div class="inner">
       <p class="kicker">src/lib/orchestrator/prompts.ts &middot; buildPlanPrompt</p>
       <h2>Plan: a rigid template, filled in</h2>
-      <pre><code>You are the Plan stage of an automated coding pipeline. Research this codebase (you cannot edit any files in this mode) and produce a plan for the following task.
+      <pre data-src="src/lib/orchestrator/prompts.ts" data-quote="text"><code>You are the Plan stage of an automated coding pipeline. Research this codebase (you cannot edit any files in this mode) and produce a plan for the following task.
 
 Task: ${task}
 
@@ -366,11 +366,11 @@ Reply with ONLY the plan document below, filled in &mdash; no preamble, no comme
     <div class="inner">
       <p class="kicker">prompts.ts &middot; buildExecutePrompt</p>
       <h2>Execute: the plan, as-is &mdash; and the retry branch</h2>
-      <pre><code>Implement the following plan exactly as written. Do not go beyond its "Out of scope" section.
+      <pre data-src="src/lib/orchestrator/prompts.ts" data-quote="text"><code>Implement the following plan exactly as written. Do not go beyond its "Out of scope" section.
 
 ${planText}</code></pre>
       <p>With reviewer feedback from a rejected attempt, the prompt becomes:</p>
-      <pre><code>Implement the following plan exactly as written. Do not go beyond its "Out of scope" section.
+      <pre data-src="src/lib/orchestrator/prompts.ts" data-quote="text"><code>Implement the following plan exactly as written. Do not go beyond its "Out of scope" section.
 
 ${planText}
 
@@ -385,7 +385,7 @@ ${retryFeedback}</code></pre>
     <div class="inner">
       <p class="kicker">prompts.ts &middot; buildReviewPrompt</p>
       <h2>Review: judge only what is written below</h2>
-      <pre><code>You are the Review stage of an automated coding pipeline. You were not part of the planning discussion &mdash; judge only what is written below.
+      <pre data-src="src/lib/orchestrator/prompts.ts" data-quote="text"><code>You are the Review stage of an automated coding pipeline. You were not part of the planning discussion &mdash; judge only what is written below.
 
 Here is the plan that was approved:
 
@@ -409,7 +409,7 @@ Then give your reasoning on the following lines.</code></pre>
     <div class="inner">
       <p class="kicker">Plan stage &middot; src/lib/cli/claude.ts</p>
       <h2>Plan cannot write files &mdash; so the backend does</h2>
-      <pre><code>const args = ["--print", "--output-format", "stream-json", "--verbose"];
+      <pre data-src="src/lib/cli/claude.ts"><code>const args = ["--print", "--output-format", "stream-json", "--verbose"];
 if (opts.mode === "plan") {
   args.push("--permission-mode", "plan");
 } else {
@@ -425,19 +425,19 @@ if (opts.mode === "plan") {
     <div class="inner">
       <p class="kicker">Review stage &middot; claude.ts</p>
       <h2>Fresh, read-only, verdict-first &mdash; fail closed</h2>
-      <pre><code>args.push("--allowedTools", "Read Grep Glob");</code></pre>
+      <pre data-src="src/lib/cli/claude.ts"><code>args.push("--allowedTools", "Read Grep Glob");</code></pre>
       <ul>
         <li><b>Fresh session</b> &mdash; Review never resumes Plan&rsquo;s session, so it carries no reasoning it was told not to rely on.</li>
         <li><b>Read-only</b> &mdash; <code>--allowedTools "Read Grep Glob"</code>: no Edit, no Write, no Bash. Review can inspect but never mutate.</li>
         <li><b>Fed, not exploratory</b> &mdash; the plan text and the diff are in the prompt, not discovered by wandering the repo.</li>
       </ul>
-      <pre><code>export function parseVerdict(resultText: string) {
+      <pre data-src="src/lib/cli/claude.ts"><code>export function parseVerdict(resultText: string): { verdict: "APPROVE" | "NEEDS_CHANGES"; reasoning: string } {
   const match = resultText.match(/^\s*VERDICT:\s*(APPROVE|NEEDS_CHANGES)\s*\n?([\s\S]*)$/);
   if (!match) {
     // Defensive default &mdash; treat an unparseable reply as needing a human look, never a silent pass.
     return { verdict: "NEEDS_CHANGES", reasoning: `Review reply had no parseable VERDICT line:\n\n${resultText}` };
   }
-  return { verdict: match[1], reasoning: (match[2] ?? "").trim() };
+  return { verdict: match[1] as "APPROVE" | "NEEDS_CHANGES", reasoning: (match[2] ?? "").trim() };
 }</code></pre>
       <p class="why"><span class="label">Why fail-closed</span> The regex anchors the verdict to the very first line. Anything unparseable &mdash; a truncated reply, a wrong token, a model tantrum &mdash; defaults to <b>NEEDS_CHANGES</b>, never a silent pass. A broken Review can only slow the pipeline down, not approve garbage.</p>
     </div>
@@ -447,7 +447,7 @@ if (opts.mode === "plan") {
     <div class="inner">
       <p class="kicker">Execute stage &middot; src/lib/cli/opencode.ts</p>
       <h2>Execute: skip-permissions, or hang to timeout</h2>
-      <pre><code>const args = [
+      <pre data-src="src/lib/cli/opencode.ts"><code>const args = [
   "run",
   "--format",
   "json",

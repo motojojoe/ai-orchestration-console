@@ -135,6 +135,7 @@ npm run build    # production build
 npm run start    # run a production build
 npm run typecheck  # tsc --noEmit — run this after any change
 npm test         # node --test through the type-stripping loader, over an explicit file list
+npm run check:docs # every code excerpt under docs/ still matches the source it quotes
 npm run build:cli  # bundle the orch CLI to bin/orch.js
 ```
 
@@ -266,6 +267,45 @@ cached response even after the real underlying state has already changed.
 
 Desktop notifications (`src/lib/notify.ts`) fire on stage failure/timeout and on run completion,
 gated on `Notification.permission`, requested once on page load.
+
+### Docs in the console, and keeping them true: `src/lib/docs.ts`
+
+`/docs` lists the shipped docs, `/docs/<slug>` renders one, `/api/docs/<slug>` serves the raw
+document the viewer's iframe loads. Two things there are deliberate. A doc is reachable **only if
+it is listed in `DOCS`** — the slug is looked up and the *registered* path is what gets read, so no
+part of the request URL ever reaches the filesystem; that is the whole path-traversal defence, so
+do not replace it with a `join()` over a user-supplied segment. And docs render in an **iframe**
+rather than inlined, because they are standalone HTML with their own stylesheet, own `keydown`
+handling and full-viewport layout, all three of which collide with `globals.css`.
+
+**Every `<pre>` under `docs/` must declare what it is**, and `npm run check:docs` enforces it:
+
+| declaration | meaning |
+|---|---|
+| `data-src="<file>"` | verbatim quote — must appear in that file, character for character, as one contiguous run |
+| `data-src="…" data-quote="lines"` | stitched excerpt — every line must still exist in the file; only contiguity is waived |
+| `data-src="…" data-quote="text"` | a run of text that is not whole lines (a prompt body inside a template literal) — must be an exact substring |
+| `data-illustrative` | pseudo-code or a shape sketch. Not checked, and not passed off as real source |
+
+An undeclared `<pre>` is an error, not a pass — a new snippet cannot be added without someone
+deciding which of the four it is. Matching is on **content, never on `path:line`**: a line anchor
+breaks on any unrelated edit above it, and a check that fails for reasons the author cannot act on
+is a check that gets bypassed.
+
+The check runs in `.husky/pre-commit` and again in CI's `verify` job, which is a required status
+check. The hook is the fast path; CI is the one that holds, since `--no-verify` skips the hook and
+a clone where `npm install` never ran has no hook at all. Writing this gate immediately caught
+three snippets in `docs/deck/index.html` that had been mis-transcribed on the day they were
+written — `["pipe","pipe","pipe"]` for the source's `["pipe", "pipe", "pipe"]`, a `parseVerdict`
+signature with its return type dropped, and an explanatory comment spliced into a quote.
+
+**What it does not catch is prose.** "Capped at three retries" stays syntactically fine forever
+after the cap changes. Nothing decides that automatically, so the `docs-drift` job in CI only
+*asks*: when a PR touches `src/lib/{cli,orchestrator}/**`, `git.ts` or `db.ts` without touching
+`docs/`, it posts (and thereafter edits) one advisory comment. It is deliberately **not** a gate —
+most edits to those files leave the docs accurate, and a check that fails on every unrelated
+refactor is one people learn to ignore. Do not "upgrade" it to a blocking check; fix the prose
+instead.
 
 ### The CLI: `src/cli/`
 

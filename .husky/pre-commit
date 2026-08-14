@@ -1,1 +1,5 @@
 npx lint-staged
+
+# Runs over the whole working tree, not just staged files: a doc drifts when *source* changes, so
+# the pairing this checks spans two files that are rarely staged together. Offline and ~50ms.
+npm run --silent check:docs
