@@ -12,7 +12,7 @@ const USAGE = `usage:
 `;
 
 async function main(argv: string[]): Promise<number> {
-  const { positionals } = parseArgs({
+  const { positionals, values } = parseArgs({
     args: argv,
     allowPositionals: true,
     options: { project: { type: "string" } },
@@ -31,6 +31,13 @@ async function main(argv: string[]): Promise<number> {
       return commands.show(arg);
     case "doctor":
       return commands.doctor();
+    case "run": {
+      if (!arg) {
+        process.stderr.write('run needs a task, e.g. orch run "add a health endpoint"\n');
+        return EXIT.USAGE;
+      }
+      return commands.run(arg, values.project ?? process.cwd());
+    }
     default:
       process.stderr.write(USAGE);
       return EXIT.USAGE;
