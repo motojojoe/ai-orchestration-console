@@ -23,6 +23,8 @@ export interface Run {
   status: RunStatus;
   branch_name: string;
   worktree_path: string | null;
+  /** PID of the process currently driving this run; null when parked or finished. */
+  owner_pid: number | null;
   auto_approve: 0 | 1;
   plan_commit_sha: string | null;
   plan_text: string | null;
@@ -73,6 +75,9 @@ export function getDb(): DatabaseSync {
 
   const db = new DatabaseSync(path);
   db.exec("PRAGMA journal_mode = WAL;");
+  // node:sqlite defaults busy_timeout to 0, so a second writer fails immediately with
+  // SQLITE_BUSY instead of waiting. The CLI and the web app are separate processes on one file.
+  db.exec("PRAGMA busy_timeout = 5000;");
   db.exec(`
     CREATE TABLE IF NOT EXISTS runs (
       id TEXT PRIMARY KEY,
@@ -81,6 +86,7 @@ export function getDb(): DatabaseSync {
       status TEXT NOT NULL,
       branch_name TEXT NOT NULL,
       worktree_path TEXT,
+      owner_pid INTEGER,
       auto_approve INTEGER NOT NULL DEFAULT 1,
       plan_commit_sha TEXT,
       plan_text TEXT,
@@ -114,6 +120,7 @@ export function getDb(): DatabaseSync {
   `);
 
   addColumnIfMissing(db, "runs", "plan_commit_sha", "TEXT");
+  addColumnIfMissing(db, "runs", "owner_pid", "INTEGER");
 
   instance = db;
   return db;
@@ -176,4 +183,15 @@ export function listRecentProjects(limit = 8): string[] {
     .prepare(`SELECT project_path FROM recent_projects ORDER BY last_used_at DESC LIMIT ?`)
     .all(limit) as unknown as { project_path: string }[];
   return rows.map((r) => r.project_path);
+}
+
+/** Statuses that mean a pipeline is mid-flight. Terminal and parked statuses are excluded. */
+export const ACTIVE_STATUSES: RunStatus[] = ["planning", "executing", "reviewing"];
+
+/** Runs a pipeline is currently mid-flight on — whether or not their owning process is alive. */
+export function findActiveRuns(): Run[] {
+  const placeholders = ACTIVE_STATUSES.map(() => "?").join(", ");
+  return getDb()
+    .prepare(`SELECT * FROM runs WHERE status IN (${placeholders}) ORDER BY created_at DESC`)
+    .all(...ACTIVE_STATUSES) as unknown as Run[];
 }
